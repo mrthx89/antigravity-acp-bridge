@@ -88,21 +88,20 @@ TOKEN_REFRESH_SKEW = 120  # refresh this many seconds before actual expiry
 # Gemini 3 Pro models use the base name "gemini-3.1-pro-low" and control
 # thinking compute via generationConfig.thinkingConfig.thinkingLevel.
 MODEL_MAP = {
-    "gemini-3.1-pro": ("gemini-3.1-pro-low", "low"),
-    "gemini-3.1-pro-high": ("gemini-3.1-pro-low", "high"),
-    "gemini-3-flash": ("gemini-3-flash", None),
-    "gemini-3.5-flash": ("gemini-3.5-flash-low", None),
     # Gemini 3.8 Flash — thinking low/medium/high (matches Antigravity CLI 1.5.10)
-    "gemini-3.8-flash-low": ("gemini-3.8-flash-low", "LOW"),
-    "gemini-3.8-flash-medium": ("gemini-3.8-flash-medium", "MEDIUM"),
     "gemini-3.8-flash-high": ("gemini-3.8-flash-high", "HIGH"),
-    "gemini-2.5-pro": ("gemini-2.5-pro", None),
-    "gemini-2.5-flash": ("gemini-2.5-flash", None),
-    "claude-sonnet-4.6": ("claude-sonnet-4-6-thinking", None),
+    "gemini-3.8-flash-medium": ("gemini-3.8-flash-medium", "MEDIUM"),
+    "gemini-3.8-flash-low": ("gemini-3.8-flash-low", "LOW"),
+    # Claude 4.6 — Sonnet backend id is claude-sonnet-4-6; Opus uses the -thinking id
+    "claude-sonnet-4-6": ("claude-sonnet-4-6", None),
+    "claude-sonnet-4.6": ("claude-sonnet-4-6", None),
     "claude-opus-4.6": ("claude-opus-4-6-thinking", None),
+    # GPT-OSS 120B
+    "gpt-oss-120b": ("gpt-oss-120b-medium", None),
+    "gpt-oss-120b-medium": ("gpt-oss-120b-medium", None),
 }
 
-DEFAULT_MODEL = "gemini-2.5-flash"
+DEFAULT_MODEL = "gemini-3.8-flash-high"
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Token / OAuth management (thread-safe)
@@ -672,7 +671,7 @@ def _build_gemini_request(body: dict, backend_model: str, thinking_level: str = 
     if "seed" in body and body["seed"] is not None:
         gen_config["seed"] = int(body["seed"])
     # Enable thinking for the thinking variant of Claude 4.6 models (sonnet + opus).
-    if backend_model in ("claude-opus-4-6-thinking", "claude-sonnet-4-6-thinking"):
+    if backend_model in ("claude-opus-4-6-thinking", "claude-sonnet-4-6"):
         thinking_cfg = gen_config.get("thinkingConfig", {})
         thinking_cfg.setdefault("includeThoughts", False)
         gen_config["thinkingConfig"] = thinking_cfg

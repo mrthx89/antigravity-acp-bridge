@@ -48,19 +48,14 @@ Your Tool (OpenAI format)  →  Antigravity Proxy (localhost:8877)  →  Gemini 
 
 ## Available Models
 
-| Friendly Name             | Backend Model                 | Thinking | Type    |
-|---------------------------|-------------------------------|----------|---------|
-| `gemini-3.8-flash-high`   | `gemini-3.8-flash-high`       | High     | Gemini  |
-| `gemini-3.8-flash-medium` | `gemini-3.8-flash-medium`     | Medium   | Gemini  |
-| `gemini-3.8-flash-low`    | `gemini-3.8-flash-low`        | Low      | Gemini  |
-| `gemini-3.1-pro`          | `gemini-3.1-pro-low`          | Low      | Gemini  |
-| `gemini-3.1-pro-high`     | `gemini-3.1-pro-low`          | High     | Gemini  |
-| `gemini-3-flash`          | `gemini-3-flash`              | —        | Gemini  |
-| `gemini-3.5-flash`        | `gemini-3.5-flash-low`        | —        | Gemini  |
-| `gemini-2.5-pro`          | `gemini-2.5-pro`              | —        | Gemini  |
-| `gemini-2.5-flash`        | `gemini-2.5-flash`            | —        | Gemini  |
-| `claude-sonnet-4.6`       | `claude-sonnet-4-6-thinking`  | Enabled  | Claude  |
-| `claude-opus-4.6`         | `claude-opus-4-6-thinking`    | Enabled  | Claude  |
+| Friendly Name             | Backend Model              | Thinking | Type     |
+|---------------------------|----------------------------|----------|----------|
+| `gemini-3.8-flash-high`   | `gemini-3.8-flash-high`    | High     | Gemini   |
+| `gemini-3.8-flash-medium` | `gemini-3.8-flash-medium`  | Medium   | Gemini   |
+| `gemini-3.8-flash-low`    | `gemini-3.8-flash-low`     | Low      | Gemini   |
+| `claude-sonnet-4.6`       | `claude-sonnet-4-6`        | Enabled  | Claude   |
+| `claude-opus-4.6`         | `claude-opus-4-6-thinking` | Enabled  | Claude   |
+| `gpt-oss-120b`            | `gpt-oss-120b-medium`      | Medium   | GPT-OSS  |
 
 You always use the **friendly name** in your client. The proxy handles translation.
 

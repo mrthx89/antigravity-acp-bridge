@@ -2,7 +2,7 @@
 
 # Antigravity Proxy
 
-**Free Gemini 3.5 Flash, Claude Sonnet 4.6 & more — through a local OpenAI-compatible proxy**
+**Free Gemini 3.8 Flash, Claude Sonnet 4.6 & more — through a local OpenAI-compatible proxy**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
@@ -39,7 +39,7 @@ Your Tool (OpenAI format)  →  Antigravity Proxy (localhost:8877)  →  Gemini 
 - **OpenAI-compatible** `POST /v1/chat/completions` — streaming + non-streaming
 - **Native Gemini passthrough** `POST /v1beta/models/{model}:generateContent` — images, structured JSON output
 - **Tool/function calling** — OpenAI tools format → Gemini functionDeclarations, with round-trip encoding
-- **Model auto-mapping** — use friendly names (`gemini-3.5-flash`), the proxy translates to backend names automatically
+- **Model auto-mapping** — use friendly names (`gemini-3.8-flash-high`), the proxy translates to backend names automatically
 - **OAuth token auto-refresh** — token refreshed automatically when expired, no manual intervention
 - **Zero pip dependencies** — Python 3.10+ standard library only
 - **systemd service** included — run as a background service on Linux
@@ -48,18 +48,23 @@ Your Tool (OpenAI format)  →  Antigravity Proxy (localhost:8877)  →  Gemini 
 
 ## Available Models
 
-| Friendly Name         | Backend Model              | Thinking       | Type    |
-|-----------------------|----------------------------|----------------|---------|
-| `gemini-3.1-pro`      | `gemini-3.1-pro-low`       | Low            | Gemini  |
-| `gemini-3.1-pro-high` | `gemini-3.1-pro-low`       | High           | Gemini  |
-| `gemini-3-flash`      | `gemini-3-flash`           | —              | Gemini  |
-| `gemini-3.5-flash`    | `gemini-3.5-flash-low`     | —              | Gemini  |
-| `gemini-2.5-pro`      | `gemini-2.5-pro`           | —              | Gemini  |
-| `gemini-2.5-flash`    | `gemini-2.5-flash`         | —              | Gemini  |
-| `claude-sonnet-4.6`   | `claude-sonnet-4-6`        | —              | Claude  |
-| `claude-opus-4.6`     | `claude-opus-4-6-thinking` | Enabled        | Claude  |
+| Friendly Name             | Backend Model                 | Thinking | Type    |
+|---------------------------|-------------------------------|----------|---------|
+| `gemini-3.8-flash-high`   | `gemini-3.8-flash-high`       | High     | Gemini  |
+| `gemini-3.8-flash-medium` | `gemini-3.8-flash-medium`     | Medium   | Gemini  |
+| `gemini-3.8-flash-low`    | `gemini-3.8-flash-low`        | Low      | Gemini  |
+| `gemini-3.1-pro`          | `gemini-3.1-pro-low`          | Low      | Gemini  |
+| `gemini-3.1-pro-high`     | `gemini-3.1-pro-low`          | High     | Gemini  |
+| `gemini-3-flash`          | `gemini-3-flash`              | —        | Gemini  |
+| `gemini-3.5-flash`        | `gemini-3.5-flash-low`        | —        | Gemini  |
+| `gemini-2.5-pro`          | `gemini-2.5-pro`              | —        | Gemini  |
+| `gemini-2.5-flash`        | `gemini-2.5-flash`            | —        | Gemini  |
+| `claude-sonnet-4.6`       | `claude-sonnet-4-6-thinking`  | Enabled  | Claude  |
+| `claude-opus-4.6`         | `claude-opus-4-6-thinking`    | Enabled  | Claude  |
 
 You always use the **friendly name** in your client. The proxy handles translation.
+
+> **Recommended:** `gemini-3.8-flash-high` — Gemini 3.8 Flash with high reasoning (matches Antigravity CLI 1.5.10).
 
 ---
 
@@ -83,7 +88,7 @@ agy
 ### Install & Run
 
 ```bash
-git clone https://github.com/usamashehab/antigravity-proxy.git
+git clone https://github.com/mrthx89/antigravity-proxy.git
 cd antigravity-proxy
 
 # Start the proxy
@@ -112,7 +117,7 @@ client = OpenAI(
 )
 
 response = client.chat.completions.create(
-    model="gemini-3.5-flash",
+    model="gemini-3.8-flash-high",
     messages=[{"role": "user", "content": "Hello!"}],
 )
 print(response.choices[0].message.content)
@@ -126,7 +131,7 @@ print(response.choices[0].message.content)
 curl http://127.0.0.1:8877/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "gemini-3.5-flash",
+    "model": "gemini-3.8-flash-high",
     "messages": [{"role": "user", "content": "Hello!"}]
   }'
 ```
@@ -138,7 +143,7 @@ curl http://127.0.0.1:8877/v1/chat/completions \
 ```bash
 export OPENAI_API_BASE=http://127.0.0.1:8877/v1
 export OPENAI_API_KEY=antigravity
-aider --model gemini-3.5-flash
+aider --model gemini-3.8-flash-high
 ```
 </details>
 
@@ -151,7 +156,7 @@ In `~/.continue/config.json`:
   "models": [{
     "title": "Antigravity",
     "provider": "openai",
-    "model": "gemini-3.5-flash",
+    "model": "gemini-3.8-flash-high",
     "apiBase": "http://127.0.0.1:8877/v1",
     "apiKey": "antigravity"
   }]
@@ -166,7 +171,7 @@ In `~/.continue/config.json`:
 hermes config set model.provider custom
 hermes config set model.base_url http://127.0.0.1:8877/v1
 hermes config set model.api_key antigravity
-hermes config set model.default gemini-3.5-flash
+hermes config set model.default gemini-3.8-flash-high
 ```
 </details>
 
@@ -188,7 +193,7 @@ from langchain_openai import ChatOpenAI
 llm = ChatOpenAI(
     base_url="http://127.0.0.1:8877/v1",
     api_key="antigravity",
-    model="gemini-3.5-flash",
+    model="gemini-3.8-flash-high",
 )
 ```
 </details>
@@ -201,7 +206,7 @@ llm = ChatOpenAI(
 
 This repo includes [`AGENTS.md`](AGENTS.md) — a complete instruction file for AI agents. Just tell your AI assistant:
 
-> "Help me install and configure the antigravity-proxy from https://github.com/usamashehab/antigravity-proxy"
+> "Help me install and configure the antigravity-proxy from https://github.com/mrthx89/antigravity-proxy"
 
 The AI will read `AGENTS.md` and guide you through every step: prerequisites check, installation, tool configuration, and troubleshooting.
 
@@ -222,7 +227,7 @@ python3 antigravity_proxy.py [--port PORT] [--host HOST]
 
 ```bash
 # Clone to permanent location
-git clone https://github.com/usamashehab/antigravity-proxy.git ~/antigravity-proxy
+git clone https://github.com/mrthx89/antigravity-proxy.git ~/antigravity-proxy
 
 # Install service
 mkdir -p ~/.config/systemd/user
@@ -241,6 +246,7 @@ systemctl --user status antigravity-proxy
 |------------------------------|---------|------------------------------------|
 | `ANTIGRAVITY_CLIENT_ID`      | built-in| Override OAuth client ID           |
 | `ANTIGRAVITY_CLIENT_SECRET`  | built-in| Override OAuth client secret       |
+| `ANTIGRAVITY_PROJECT_ID`     | auto    | Override project ID (auto-discovered) |
 
 The default client credentials are the same values embedded in every Antigravity CLI binary — you only need these env vars if you're using a custom build.
 
@@ -272,7 +278,7 @@ Accepts the exact same format as Google's Generative Language API. Use this for:
 <summary><b>Structured output example</b></summary>
 
 ```bash
-curl http://127.0.0.1:8877/v1beta/models/gemini-3.5-flash:generateContent \
+curl http://127.0.0.1:8877/v1beta/models/gemini-3.8-flash-high:generateContent \
   -H "Content-Type: application/json" \
   -d '{
     "contents": [{"parts": [{"text": "Extract: Ahmed is 30 years old"}]}],
@@ -299,7 +305,7 @@ curl http://127.0.0.1:8877/v1beta/models/gemini-3.5-flash:generateContent \
 # Base64-encode an image and send it
 B64=$(base64 -w0 photo.jpg)
 
-curl http://127.0.0.1:8877/v1beta/models/gemini-3.5-flash:generateContent \
+curl http://127.0.0.1:8877/v1beta/models/gemini-3.8-flash-high:generateContent \
   -H "Content-Type: application/json" \
   -d "{
     \"contents\": [{
@@ -350,7 +356,7 @@ Antigravity Proxy (localhost:8877)
     │  └─ Wraps in Antigravity envelope {project, model, request}
     │
     ▼
-cloudcode-pa.googleapis.com
+daily-cloudcode-pa.googleapis.com
     │
     ▼
 Gemini / Claude models → Response unwrapped → OpenAI format → Your client
@@ -377,9 +383,11 @@ Edit `MODEL_MAP` at the top of `antigravity_proxy.py`:
 
 ```python
 MODEL_MAP = {
-    "gemini-3.5-flash": ("gemini-3.5-flash-low", None),
+    "gemini-3.8-flash-high": ("gemini-3.8-flash-high", "HIGH"),
+    "gemini-3.8-flash-medium": ("gemini-3.8-flash-medium", "MEDIUM"),
+    "gemini-3.8-flash-low": ("gemini-3.8-flash-low", "LOW"),
     # "friendly-name": ("backend-name", thinking_level),
-    # thinking_level: "low", "high", or None
+    # thinking_level: "LOW", "MEDIUM", "HIGH", or None
 }
 ```
 

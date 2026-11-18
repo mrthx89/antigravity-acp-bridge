@@ -401,3 +401,78 @@ class AgyCliBackendTests(unittest.TestCase):
             server.shutdown()
             server.server_close()
             thread.join(timeout=2)
+
+
+class _LiveWorker:
+    """Stand-in for AgyAcpWorker that reports a live process (no subprocess needed)."""
+
+    def __init__(self) -> None:
+        self.closed = False
+
+    def is_alive(self) -> bool:
+        return True
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class PoolLimitSemanticsTest(unittest.TestCase):
+    """Contract for --max-concurrency: >0 caps the warm pool, <=0 means unlimited."""
+
+    @staticmethod
+    def _client(limit: int) -> AgyCliClient:
+        return AgyCliClient(ProxyConfig(backend="agy-cli", max_concurrency=limit))
+
+    def test_positive_limit_sets_pool_cap(self) -> None:
+        client = self._client(3)
+        try:
+            self.assertEqual(client._max_workers, 3)
+        finally:
+            client.close()
+
+    def test_zero_and_negative_mean_unlimited(self) -> None:
+        for limit in (0, -1, -42):
+            client = self._client(limit)
+            try:
+                self.assertIsNone(client._max_workers, f"limit {limit} should mean no cap")
+            finally:
+                client.close()
+
+    def test_unlimited_acquire_never_blocks_or_reuses(self) -> None:
+        client = self._client(0)
+        try:
+            with patch("antigravity_proxy.agy_cli.shutil.which", return_value="agy"), patch(
+                "antigravity_proxy.agy_cli.AgyAcpWorker", side_effect=lambda *a, **k: _LiveWorker()
+            ):
+                workers = [client._acquire_worker() for _ in range(5)]
+                self.assertEqual(len({id(w) for w in workers}), 5)
+                self.assertEqual(client._created, 5)
+                for worker in workers:
+                    client._release_worker(worker, broken=False)
+                # Released live workers come back out of the LIFO pool for reuse.
+                self.assertIs(client._acquire_worker(), workers[-1])
+        finally:
+            client.close()
+
+    def test_capped_pool_blocks_when_exhausted(self) -> None:
+        client = self._client(1)
+        try:
+            with patch("antigravity_proxy.agy_cli.shutil.which", return_value="agy"), patch(
+                "antigravity_proxy.agy_cli.AgyAcpWorker", side_effect=lambda *a, **k: _LiveWorker()
+            ):
+                first = client._acquire_worker()
+                acquired: list = []
+                thread = threading.Thread(
+                    target=lambda: acquired.append(client._acquire_worker()), daemon=True
+                )
+                thread.start()
+                thread.join(timeout=0.3)
+                self.assertTrue(
+                    thread.is_alive(), "second acquire must block while the only worker is out"
+                )
+                client._release_worker(first, broken=False)
+                thread.join(timeout=2)
+                self.assertFalse(thread.is_alive())
+                self.assertEqual(acquired, [first])
+        finally:
+            client.close()

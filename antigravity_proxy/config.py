@@ -140,6 +140,8 @@ class ProxyConfig:
     upstream_timeout: int = UPSTREAM_TIMEOUT
     agy_bin: str = "agy"
     agy_cwd: str | None = None
+    # Warm worker pool size for the agy-cli backend. <= 0 means unlimited:
+    # one live ``agy`` subprocess per concurrent request, no cap.
     max_concurrency: int = 2
 
     @property

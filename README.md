@@ -248,7 +248,7 @@ python3 antigravity_proxy.py [--port PORT] [--host HOST] [--backend {agy-cli,oau
   --backend {agy-cli,oauth}    Execution backend: agy-cli (default, persistent official `agy acp` workers) or oauth (legacy direct API)
   --agy-bin PATH               Path/command for `agy` when using --backend agy-cli (default: agy)
   --agy-cwd DIR                Working directory for agy-cli calls (default: isolated temp dir)
-  --max-concurrency N          Max concurrent agy-cli calls, 0 = unlimited (default: 2)
+  --max-concurrency N          Max concurrent agy-cli calls (default: 2); 0 or negative = unlimited
   --api-key KEY                Require Bearer / x-api-key auth on API routes
   --allow-unauthenticated      Allow non-localhost binding without --api-key (unsafe)
   --cors-origin ORIGINS        CORS Allow-Origin header or comma-separated list (default: *)
@@ -488,6 +488,8 @@ Yes, through the native Gemini passthrough endpoint (`/v1beta/models/{model}:gen
 <summary><b>Is there a rate limit?</b></summary>
 
 Upstream quota is enforced by Google's Antigravity service. Locally, `--backend agy-cli` limits concurrent workers via `--max-concurrency` (default `2`; use `1` for conservative personal usage).
+
+Passing `0` (or any negative value) means **unlimited**: no cap is applied, so every concurrent request may hold its own `agy` worker. Budget for it — each warm worker is a full `agy acp --stdio` process at roughly **230 MB RSS**, and workers that finish a request stay pooled at the historical peak concurrency until the proxy restarts. On a 4 GB host, unlimited plus a burst of 5+ parallel requests will push you into swap. Set a positive number unless the machine has headroom.
 </details>
 
 <details>

@@ -165,7 +165,8 @@ def main(argv: list[str] | None = None) -> int:
     logger.info("  CORS:     %s", config.cors_origins)
     logger.info("  Models:   %s", models_summary)
     if config.backend == "agy-cli":
-        logger.info("  Workers:  max_concurrency=%s", config.max_concurrency or "unlimited")
+        workers_label = "unlimited" if config.max_concurrency <= 0 else config.max_concurrency
+        logger.info("  Workers:  max_concurrency=%s", workers_label)
     else:
         logger.info("  Token:    %s", config.token_file)
     logger.info("  Press Ctrl+C to stop")

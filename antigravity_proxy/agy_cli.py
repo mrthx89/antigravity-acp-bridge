@@ -482,7 +482,11 @@ class AgyCliClient:
     def __init__(self, config: ProxyConfig) -> None:
         self._config = config
         self._cached_models: list[str] | None = None
-        self._max_workers = max(1, config.max_concurrency) if config.max_concurrency >= 0 else 1
+        # 0 or negative means "no cap": every concurrent request may hold its own worker.
+        # Positive values bound the pool to that many warm ``agy`` subprocesses.
+        self._max_workers: int | None = (
+            config.max_concurrency if config.max_concurrency > 0 else None
+        )
         self._pool: queue.LifoQueue[AgyAcpWorker] = queue.LifoQueue()
         self._lock = threading.Lock()
         self._created = 0
@@ -542,7 +546,7 @@ class AgyCliClient:
             pass
 
         with self._lock:
-            if self._created < self._max_workers:
+            if self._max_workers is None or self._created < self._max_workers:
                 exe = self.resolve_bin()
                 if not exe:
                     raise AgyCliError(f"`{self._config.agy_bin}` executable not found", status=500)

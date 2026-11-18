@@ -143,6 +143,9 @@ class ProxyConfig:
     # Warm worker pool size for the agy-cli backend. <= 0 means unlimited:
     # one live ``agy`` subprocess per concurrent request, no cap.
     max_concurrency: int = 2
+    # Seconds a pooled worker may sit idle before it is closed (pool shrinks).
+    # 0 disables reaping.
+    worker_idle_timeout: float = 300.0
 
     @property
     def is_localhost(self) -> bool:
@@ -171,6 +174,9 @@ class ProxyConfig:
             "agy_bin": os.environ.get("ANTIGRAVITY_AGY_BIN", "agy"),
             "agy_cwd": os.environ.get("ANTIGRAVITY_AGY_CWD") or None,
             "max_concurrency": int(os.environ.get("ANTIGRAVITY_MAX_CONCURRENCY", "2")),
+            "worker_idle_timeout": float(
+                os.environ.get("ANTIGRAVITY_WORKER_IDLE_TIMEOUT", "300")
+            ),
         }
         defaults.update({k: v for k, v in overrides.items() if v is not None})
         return cls(**defaults)

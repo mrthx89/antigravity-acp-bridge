@@ -249,6 +249,7 @@ python3 antigravity_proxy.py [--port PORT] [--host HOST] [--backend {agy-cli,oau
   --agy-bin PATH               Path/command for `agy` when using --backend agy-cli (default: agy)
   --agy-cwd DIR                Working directory for agy-cli calls (default: isolated temp dir)
   --max-concurrency N          Max concurrent agy-cli calls (default: 2); 0 or negative = unlimited
+  --worker-idle-timeout SECS   Close an idle agy worker after SECS (default: 300; 0 = never reap)
   --api-key KEY                Require Bearer / x-api-key auth on API routes
   --allow-unauthenticated      Allow non-localhost binding without --api-key (unsafe)
   --cors-origin ORIGINS        CORS Allow-Origin header or comma-separated list (default: *)
@@ -490,6 +491,14 @@ Yes, through the native Gemini passthrough endpoint (`/v1beta/models/{model}:gen
 Upstream quota is enforced by Google's Antigravity service. Locally, `--backend agy-cli` limits concurrent workers via `--max-concurrency` (default `2`; use `1` for conservative personal usage).
 
 Passing `0` (or any negative value) means **unlimited**: no cap is applied, so every concurrent request may hold its own `agy` worker. Budget for it — each warm worker is a full `agy acp --stdio` process at roughly **230 MB RSS**, and workers that finish a request stay pooled at the historical peak concurrency until the proxy restarts. On a 4 GB host, unlimited plus a burst of 5+ parallel requests will push you into swap. Set a positive number unless the machine has headroom.
+
+The idle reaper keeps that bounded: a worker parked longer than `--worker-idle-timeout`
+(default `300` s) is closed and its memory returned, so the pool shrinks back down after a
+burst instead of staying at peak forever. The cost is a cold start on the next request
+that needs a fresh worker (spawn + ACP session init; measured on this host, a cold request
+took 14.4 s versus 16.5 s warm — end-to-end latency is dominated by upstream model time,
+so the cold-start penalty is small and noisy). Set `--worker-idle-timeout 0` to keep
+workers warm indefinitely.
 </details>
 
 <details>

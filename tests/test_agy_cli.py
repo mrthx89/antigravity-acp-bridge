@@ -6,6 +6,7 @@ import json
 import os
 import tempfile
 import threading
+import time
 import unittest
 from unittest.mock import MagicMock, patch
 from urllib.error import HTTPError
@@ -474,5 +475,59 @@ class PoolLimitSemanticsTest(unittest.TestCase):
                 thread.join(timeout=2)
                 self.assertFalse(thread.is_alive())
                 self.assertEqual(acquired, [first])
+        finally:
+            client.close()
+
+
+class IdleReaperTests(unittest.TestCase):
+    """Idle workers must be closed so an unlimited pool does not park burst memory."""
+
+    @staticmethod
+    def _client(timeout: float, limit: int = 0) -> AgyCliClient:
+        return AgyCliClient(
+            ProxyConfig(backend="agy-cli", max_concurrency=limit, worker_idle_timeout=timeout)
+        )
+
+    def test_reaper_disabled_when_timeout_is_zero(self) -> None:
+        client = self._client(0)
+        try:
+            self.assertIsNone(client._reaper)
+        finally:
+            client.close()
+
+    def test_expired_idle_workers_are_closed(self) -> None:
+        client = self._client(0.2)
+        try:
+            workers: list[_LiveWorker] = []
+            with patch("antigravity_proxy.agy_cli.shutil.which", return_value="agy"), patch(
+                "antigravity_proxy.agy_cli.AgyAcpWorker",
+                side_effect=lambda *a, **k: workers.append(_LiveWorker()) or workers[-1],
+            ):
+                held = [client._acquire_worker() for _ in range(2)]
+                for worker in held:
+                    client._release_worker(worker, broken=False)
+                self.assertEqual(client._created, 2)
+
+                deadline = time.time() + 6
+                while client._created > 0 and time.time() < deadline:
+                    time.sleep(0.05)
+
+            self.assertEqual(client._created, 0)
+            self.assertEqual(len(workers), 2)
+            self.assertTrue(all(w.closed for w in workers))
+        finally:
+            client.close()
+
+    def test_busy_workers_survive_the_reaper(self) -> None:
+        client = self._client(0.2)
+        try:
+            with patch("antigravity_proxy.agy_cli.shutil.which", return_value="agy"), patch(
+                "antigravity_proxy.agy_cli.AgyAcpWorker", side_effect=lambda *a, **k: _LiveWorker()
+            ):
+                busy = client._acquire_worker()
+                time.sleep(1.4)  # longer than the 1 s reaper tick
+                self.assertTrue(busy.is_alive())
+                self.assertEqual(client._created, 1)
+                client._release_worker(busy, broken=False)
         finally:
             client.close()

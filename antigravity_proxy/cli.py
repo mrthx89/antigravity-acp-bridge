@@ -67,6 +67,15 @@ def build_arg_parser() -> ArgumentParser:
         help="Max concurrent agy-cli subprocesses, 0 for unlimited (default: 2)",
     )
     parser.add_argument(
+        "--worker-idle-timeout",
+        type=float,
+        default=None,
+        help=(
+            "Seconds an idle agy-cli worker stays warm before it is closed "
+            "(or ANTIGRAVITY_WORKER_IDLE_TIMEOUT, default: 300; 0 disables)"
+        ),
+    )
+    parser.add_argument(
         "--api-key",
         default=None,
         help="Require Bearer / x-api-key auth on API routes (or ANTIGRAVITY_PROXY_API_KEY)",
@@ -105,6 +114,7 @@ def main(argv: list[str] | None = None) -> int:
         agy_bin=args.agy_bin,
         agy_cwd=args.agy_cwd,
         max_concurrency=args.max_concurrency,
+        worker_idle_timeout=args.worker_idle_timeout,
     )
 
     if not config.is_localhost and not config.api_key:
@@ -167,6 +177,12 @@ def main(argv: list[str] | None = None) -> int:
     if config.backend == "agy-cli":
         workers_label = "unlimited" if config.max_concurrency <= 0 else config.max_concurrency
         logger.info("  Workers:  max_concurrency=%s", workers_label)
+        idle_label = (
+            f"reap after {config.worker_idle_timeout:.0f}s"
+            if config.worker_idle_timeout > 0
+            else "never reaped"
+        )
+        logger.info("  Idle:     %s", idle_label)
     else:
         logger.info("  Token:    %s", config.token_file)
     logger.info("  Press Ctrl+C to stop")

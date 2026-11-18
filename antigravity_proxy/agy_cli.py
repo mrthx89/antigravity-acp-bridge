@@ -487,10 +487,20 @@ class AgyCliClient:
         self._max_workers: int | None = (
             config.max_concurrency if config.max_concurrency > 0 else None
         )
-        self._pool: queue.LifoQueue[AgyAcpWorker] = queue.LifoQueue()
+        self._pool: queue.LifoQueue[tuple[AgyAcpWorker, float]] = queue.LifoQueue()
         self._lock = threading.Lock()
         self._created = 0
         self._closed = False
+        # Idle workers are closed after this many seconds so an unlimited pool does not
+        # keep peak-burst memory parked forever. 0 disables the reaper.
+        self._idle_timeout = float(config.worker_idle_timeout)
+        self._stop = threading.Event()
+        self._reaper: threading.Thread | None = None
+        if self._idle_timeout > 0:
+            self._reaper = threading.Thread(
+                target=self._reap_idle_workers, name="agy-idle-reaper", daemon=True
+            )
+            self._reaper.start()
 
     def resolve_bin(self) -> str | None:
         """Locate the ``agy`` executable across PATH and standard Windows/Linux dirs."""
@@ -541,7 +551,8 @@ class AgyCliClient:
 
     def _acquire_worker(self) -> AgyAcpWorker:
         try:
-            return self._pool.get_nowait()
+            worker, _idle_since = self._pool.get_nowait()
+            return worker
         except queue.Empty:
             pass
 
@@ -553,7 +564,8 @@ class AgyCliClient:
                 self._created += 1
                 return AgyAcpWorker(exe, self._config)
 
-        return self._pool.get()
+        worker, _idle_since = self._pool.get()
+        return worker
 
     def _release_worker(self, worker: AgyAcpWorker, *, broken: bool) -> None:
         if self._closed or broken or not worker.is_alive():
@@ -561,7 +573,40 @@ class AgyCliClient:
             with self._lock:
                 self._created = max(0, self._created - 1)
             return
-        self._pool.put(worker)
+        self._pool.put((worker, time.monotonic()))
+
+    def _reap_idle_workers(self) -> None:
+        """Close workers that sat idle past ``worker_idle_timeout``, shrinking the pool.
+
+        Without this an unlimited pool keeps peak-burst memory resident until restart:
+        every finished request leaves its ~230 MB ``agy`` process parked in the queue.
+        """
+        tick = max(1.0, min(30.0, self._idle_timeout / 2))
+        while not self._stop.wait(tick):
+            now = time.monotonic()
+            keep: list[tuple[AgyAcpWorker, float]] = []
+            reaped = 0
+            while True:
+                try:
+                    worker, idle_since = self._pool.get_nowait()
+                except queue.Empty:
+                    break
+                if now - idle_since >= self._idle_timeout:
+                    worker.close()
+                    reaped += 1
+                else:
+                    keep.append((worker, idle_since))
+            for item in keep:
+                self._pool.put(item)
+            if reaped:
+                with self._lock:
+                    self._created = max(0, self._created - reaped)
+                logger.info(
+                    "Idle reaper closed %d worker(s) after %.0fs idle; %d still warm",
+                    reaped,
+                    self._idle_timeout,
+                    len(keep),
+                )
 
     def list_models(self) -> list[str]:
         """Return model IDs reported by ``agy models``, falling back to MODEL_MAP."""
@@ -708,9 +753,13 @@ class AgyCliClient:
     def close(self) -> None:
         """Shut down all pooled ACP workers and clean up temp directories."""
         self._closed = True
+        self._stop.set()
+        reaper = self._reaper
+        if reaper is not None and reaper.is_alive() and reaper is not threading.current_thread():
+            reaper.join(timeout=5)
         while True:
             try:
-                worker = self._pool.get_nowait()
+                worker, _idle_since = self._pool.get_nowait()
             except queue.Empty:
                 break
             worker.close()

@@ -46,21 +46,34 @@ Your Tool (OpenAI format)  →  Antigravity Proxy (localhost:8877)  →  Gemini 
 
 ---
 
-## Available Models
+| Friendly Name                      | Backend Model                      | Thinking   | Type       |
+|--------------------------------------|-------------------------------------|-------------|-------------|
+| `gemini-4-hydrogen-high` | `gemini-4-hydrogen-high` | High      | Gemini     |
+| `gemini-4-hydrogen-xhigh` | `gemini-4-hydrogen-xhigh` | High      | Gemini     |
+| `gemini-4-hydrogen-medium` | `gemini-4-hydrogen-medium` | Medium    | Gemini     |
+| `gemini-4-hydrogen-low` | `gemini-4-hydrogen-low` | Low       | Gemini     |
+| `gemini-4-argon-high` | `gemini-4-argon-high` | High      | Gemini     |
+| `gemini-4-argon-medium` | `gemini-4-argon-medium` | Medium    | Gemini     |
+| `gemini-4-argon-low` | `gemini-4-argon-low` | Low       | Gemini     |
+| `gemini-pro-orchestrator-g1-pro` | `gemini-pro-orchestrator-g1-pro` | High      | Gemini     |
+| `gemini-3.8-flash-high` | `gemini-3.8-flash-high` | High      | Gemini     |
+| `gemini-3.8-flash-medium` | `gemini-3.8-flash-medium` | Medium    | Gemini     |
+| `gemini-3.8-flash-low` | `gemini-3.8-flash-low` | Low       | Gemini     |
+| `gpt-oss-120b-medium` | `gpt-oss-120b-medium` | Medium    | GPT-OSS    |
+| `claude-sonnet-4-6` | `claude-sonnet-4-6` | Enabled   | Claude     |
+| `claude-sonnet-5-5-low` | `claude-sonnet-5-5-low` | Low       | Claude     |
+| `claude-sonnet-5-5-medium` | `claude-sonnet-5-5-medium` | Medium    | Claude     |
+| `claude-sonnet-5-5-high` | `claude-sonnet-5-5-high` | High      | Claude     |
+| `claude-opus-4-6-thinking` | `claude-opus-4-6-thinking` | Enabled   | Claude     |
+| `claude-opus-5-5-low` | `claude-opus-5-5-low` | Low       | Claude     |
+| `claude-opus-5-5-medium` | `claude-opus-5-5-medium` | Medium    | Claude     |
+| `claude-opus-5-5-high` | `claude-opus-5-5-high` | High      | Claude     |
 
-| Friendly Name             | Backend Model              | Thinking | Type     |
-|---------------------------|----------------------------|----------|----------|
-| `gemini-3.8-flash-high`   | `gemini-3.8-flash-high`    | High     | Gemini   |
-| `gemini-3.8-flash-medium` | `gemini-3.8-flash-medium`  | Medium   | Gemini   |
-| `gemini-3.8-flash-low`    | `gemini-3.8-flash-low`     | Low      | Gemini   |
-| `claude-sonnet-4.6`       | `claude-sonnet-4-6`        | Enabled  | Claude   |
-| `claude-opus-4.6`         | `claude-opus-4-6-thinking` | Enabled  | Claude   |
-| `gpt-oss-120b`            | `gpt-oss-120b-medium`      | Medium   | GPT-OSS  |
-
-You always use the **friendly name** in your client. The proxy handles translation.
+> **Note:** Always use the **friendly name** in your client — the proxy translates it to the backend model id automatically. Whether a model actually **runs** depends on your Antigravity package/access tier; any may return `404` until your account provisions it.
 
 > **Recommended:** `gemini-3.8-flash-high` — Gemini 3.8 Flash with high reasoning (matches Antigravity CLI 1.5.10).
 
+> **Aliases:** `gemini-3.8-flash`, `claude-sonnet-4.6`, `claude-opus-4.6`, and `gpt-oss-120b` are also accepted as short forms of their full model ids.
 ---
 
 ## Quick Start

@@ -87,18 +87,43 @@ TOKEN_REFRESH_SKEW = 120  # refresh this many seconds before actual expiry
 # Model mapping: OpenAI-facing name -> (backend model name, thinking level).
 # Gemini 3 Pro models use the base name "gemini-3.1-pro-low" and control
 # thinking compute via generationConfig.thinkingConfig.thinkingLevel.
+# Backend model ids must exactly match the model ids returned by `agy models`.
+# The friendly name (what a client sends) maps to: (backend model id, thinking level).
+# Thinking level is derived from the model id suffix; xhigh maps to the Gemini ceiling HIGH.
+def _lvl(suffix):
+    return {"high": "HIGH", "xhigh": "HIGH", "medium": "MEDIUM", "low": "LOW"}.get(suffix)
+
 MODEL_MAP = {
-    # Gemini 3.8 Flash — thinking low/medium/high (matches Antigravity CLI 1.5.10)
-    "gemini-3.8-flash-high": ("gemini-3.8-flash-high", "HIGH"),
-    "gemini-3.8-flash-medium": ("gemini-3.8-flash-medium", "MEDIUM"),
-    "gemini-3.8-flash-low": ("gemini-3.8-flash-low", "LOW"),
-    # Claude 4.6 — Sonnet backend id is claude-sonnet-4-6; Opus uses the -thinking id
-    "claude-sonnet-4-6": ("claude-sonnet-4-6", None),
-    "claude-sonnet-4.6": ("claude-sonnet-4-6", None),
-    "claude-opus-4.6": ("claude-opus-4-6-thinking", None),
+    # Gemini 3.8 Flash
+    "gemini-3.8-flash-high": ("gemini-3.8-flash-high", _lvl("high")),
+    "gemini-3.8-flash-medium": ("gemini-3.8-flash-medium", _lvl("medium")),
+    "gemini-3.8-flash-low": ("gemini-3.8-flash-low", _lvl("low")),
+    # Gemini 4 Hydrogen — thinking low/medium/high/xhigh
+    "gemini-4-hydrogen-high": ("gemini-4-hydrogen-high", _lvl("high")),
+    "gemini-4-hydrogen-xhigh": ("gemini-4-hydrogen-xhigh", _lvl("xhigh")),
+    "gemini-4-hydrogen-medium": ("gemini-4-hydrogen-medium", _lvl("medium")),
+    "gemini-4-hydrogen-low": ("gemini-4-hydrogen-low", _lvl("low")),
+    # Gemini 4 Argon
+    "gemini-4-argon-high": ("gemini-4-argon-high", _lvl("high")),
+    "gemini-4-argon-medium": ("gemini-4-argon-medium", _lvl("medium")),
+    "gemini-4-argon-low": ("gemini-4-argon-low", _lvl("low")),
+    # Gemini 1 Pro Orchestrator (Google G1)
+    "gemini-pro-orchestrator-g1-pro": ("gemini-pro-orchestrator-g1-pro", _lvl("high")),
     # GPT-OSS 120B
     "gpt-oss-120b": ("gpt-oss-120b-medium", None),
     "gpt-oss-120b-medium": ("gpt-oss-120b-medium", None),
+    # Claude Sonnet 4.6 — Sonnet backend id is claude-sonnet-4-6; Opus uses the -thinking id
+    "claude-sonnet-4-6": ("claude-sonnet-4-6", None),
+    "claude-sonnet-4.6": ("claude-sonnet-4-6", None),
+    "claude-opus-4.6": ("claude-opus-4-6-thinking", None),
+    # Claude Sonnet 5.5
+    "claude-sonnet-5-5-low": ("claude-sonnet-5-5-low", None),
+    "claude-sonnet-5-5-medium": ("claude-sonnet-5-5-medium", None),
+    "claude-sonnet-5-5-high": ("claude-sonnet-5-5-high", None),
+    # Claude Opus 5.5
+    "claude-opus-5-5-low": ("claude-opus-5-5-low", None),
+    "claude-opus-5-5-medium": ("claude-opus-5-5-medium", None),
+    "claude-opus-5-5-high": ("claude-opus-5-5-high", None),
 }
 
 DEFAULT_MODEL = "gemini-3.8-flash-high"

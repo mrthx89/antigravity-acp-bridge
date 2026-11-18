@@ -1,23 +1,25 @@
-"""Backend adapter delegating OpenAI chat completions to the official ``agy`` CLI."""
+"""Backend adapter using persistent ``agy acp --stdio`` workers for low latency."""
 
 from __future__ import annotations
 
 import json
 import logging
 import os
+import queue
 import shutil
 import subprocess
 import tempfile
 import threading
 import time
 import uuid
-from contextlib import nullcontext
 from typing import Iterator
 
 from .config import MODEL_MAP, ProxyConfig
 from .translator import content_to_text
 
 logger = logging.getLogger("antigravity_proxy.agy_cli")
+
+_ACP_TIMEOUT_BUFFER = 15
 
 
 class AgyCliError(Exception):
@@ -29,11 +31,11 @@ class AgyCliError(Exception):
 
 
 def parse_agy_usage(usage_raw: dict | None) -> dict:
-    """Convert ``agy`` CLI usage dict to OpenAI ``usage`` counters."""
+    """Convert ``agy`` CLI/ACP usage dict (snake_case or camelCase) to OpenAI counters."""
     usage = usage_raw or {}
-    pt = int(usage.get("input_tokens", 0) or 0)
-    ct = int(usage.get("output_tokens", 0) or 0)
-    tt = int(usage.get("total_tokens", pt + ct) or (pt + ct))
+    pt = int(usage.get("inputTokens") or usage.get("input_tokens") or 0)
+    ct = int(usage.get("outputTokens") or usage.get("output_tokens") or 0)
+    tt = int(usage.get("totalTokens") or usage.get("total_tokens") or (pt + ct))
     return {
         "prompt_tokens": pt,
         "completion_tokens": ct,
@@ -42,7 +44,7 @@ def parse_agy_usage(usage_raw: dict | None) -> dict:
 
 
 def format_messages_for_agy(messages: list[dict]) -> str:
-    """Flatten OpenAI ``messages`` into a single prompt string for ``agy -p``."""
+    """Flatten OpenAI ``messages`` into a single prompt string for ``agy``."""
     system_parts: list[str] = []
     turns: list[tuple[str, str]] = []
 
@@ -84,20 +86,228 @@ def _platform_subprocess_kwargs() -> dict:
     return {}
 
 
+class AgyAcpWorker:
+    """Persistent ``agy acp --stdio`` JSON-RPC worker to avoid per-request cold starts."""
+
+    def __init__(self, exe: str, config: ProxyConfig) -> None:
+        self._exe = exe
+        self._config = config
+        self._proc: subprocess.Popen | None = None
+        self._tmp_dir: tempfile.TemporaryDirectory | None = None
+        self._cwd: str | None = None
+        self._req_id = 0
+        self._initialized = False
+
+    def _resolve_cwd(self) -> str:
+        if self._config.agy_cwd and os.path.isdir(self._config.agy_cwd):
+            return self._config.agy_cwd
+        if self._tmp_dir is None:
+            self._tmp_dir = tempfile.TemporaryDirectory(prefix="agy-acp-")
+        return self._tmp_dir.name
+
+    def is_alive(self) -> bool:
+        return self._proc is not None and self._proc.poll() is None
+
+    def ensure_started(self) -> None:
+        """Start and initialize the ACP stdio server if not already running."""
+        if self.is_alive() and self._initialized:
+            return
+        self.close_process()
+
+        self._cwd = self._resolve_cwd()
+        cmd = [
+            self._exe,
+            "acp",
+            "--stdio",
+            "--disable-telemetry",
+            "--include-default-customizations=false",
+            "--cli_log_file",
+            os.devnull,
+        ]
+        self._proc = subprocess.Popen(
+            cmd,
+            cwd=self._cwd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            bufsize=1,
+            **_platform_subprocess_kwargs(),
+        )
+        self._req_id = 0
+        self._initialized = False
+        self._rpc(
+            "initialize",
+            {
+                "protocolVersion": 1,
+                "clientCapabilities": {},
+                "clientInfo": {"name": "antigravity-proxy", "version": "2.0.0"},
+            },
+        )
+        self._initialized = True
+
+    def _next_id(self) -> int:
+        self._req_id += 1
+        return self._req_id
+
+    def _write_json(self, obj: dict) -> None:
+        assert self._proc is not None and self._proc.stdin is not None
+        try:
+            self._proc.stdin.write(json.dumps(obj) + "\n")
+            self._proc.stdin.flush()
+        except OSError as exc:
+            raise AgyCliError(f"Failed writing to agy ACP stdin: {exc}", status=502) from exc
+
+    def _read_until_response(self, req_id: int) -> Iterator[dict]:
+        """Yield notification updates until the JSON-RPC response for ``req_id`` arrives."""
+        assert self._proc is not None and self._proc.stdout is not None
+        while True:
+            line = self._proc.stdout.readline()
+            if not line:
+                code = self._proc.poll()
+                raise AgyCliError(
+                    f"agy ACP worker exited unexpectedly (code={code})",
+                    status=502,
+                )
+            stripped = line.strip()
+            if not stripped:
+                continue
+            try:
+                msg = json.loads(stripped)
+            except json.JSONDecodeError:
+                continue
+
+            if msg.get("id") == req_id:
+                if "error" in msg and msg["error"]:
+                    err = msg["error"]
+                    err_msg = err.get("message", str(err)) if isinstance(err, dict) else str(err)
+                    raise AgyCliError(f"agy ACP error: {err_msg}", status=502)
+                yield {"__rpc_result__": msg.get("result") or {}}
+                return
+
+            # Reject any server-initiated tool permission requests immediately.
+            if "id" in msg and "method" in msg:
+                self._write_json({
+                    "jsonrpc": "2.0",
+                    "id": msg["id"],
+                    "error": {
+                        "code": -32000,
+                        "message": "Tool execution is disabled in proxy mode",
+                    },
+                })
+                continue
+
+            if msg.get("method") == "session/update":
+                yield msg
+
+    def _rpc(self, method: str, params: dict) -> dict:
+        req_id = self._next_id()
+        self._write_json({
+            "jsonrpc": "2.0",
+            "id": req_id,
+            "method": method,
+            "params": params,
+        })
+        for item in self._read_until_response(req_id):
+            if "__rpc_result__" in item:
+                return item["__rpc_result__"]
+        return {}
+
+    def stream_prompt(self, prompt: str, model: str) -> Iterator[dict]:
+        """Run one isolated ACP session and yield ``text`` and final ``usage`` dicts."""
+        self.ensure_started()
+        assert self._cwd is not None
+
+        new_res = self._rpc("session/new", {"cwd": self._cwd, "mcpServers": []})
+        session_id = new_res.get("sessionId")
+        if not session_id:
+            raise AgyCliError(f"agy ACP session/new missing sessionId: {new_res}", status=502)
+
+        try:
+            current_model = (new_res.get("models") or {}).get("currentModelId")
+            if model and model != current_model:
+                try:
+                    self._rpc("session/set_model", {"sessionId": session_id, "modelId": model})
+                except AgyCliError as exc:
+                    raise AgyCliError(f"Invalid or unavailable model '{model}': {exc}", status=400) from exc
+
+            req_id = self._next_id()
+            self._write_json({
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "method": "session/prompt",
+                "params": {
+                    "sessionId": session_id,
+                    "prompt": [{"type": "text", "text": prompt}],
+                },
+            })
+
+            for item in self._read_until_response(req_id):
+                if "__rpc_result__" in item:
+                    result = item["__rpc_result__"]
+                    yield {
+                        "finish_reason": "stop",
+                        "usage": parse_agy_usage(result.get("usage")),
+                    }
+                    break
+
+                upd = (item.get("params") or {}).get("update") or {}
+                if upd.get("sessionUpdate") == "agent_message_chunk":
+                    content = upd.get("content") or {}
+                    if content.get("type") == "text" and content.get("text"):
+                        yield {"text": content["text"]}
+        finally:
+            if self.is_alive():
+                try:
+                    self._rpc("session/close", {"sessionId": session_id})
+                except Exception:
+                    pass
+
+    def close_process(self) -> None:
+        """Terminate the ACP child process and close stdio pipes."""
+        proc = self._proc
+        self._proc = None
+        self._initialized = False
+        if proc is None:
+            return
+        for stream in (proc.stdin, proc.stdout):
+            if stream is not None:
+                try:
+                    stream.close()
+                except OSError:
+                    pass
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=3)
+
+    def close(self) -> None:
+        """Shut down the worker and remove its temporary working directory."""
+        self.close_process()
+        if self._tmp_dir is not None:
+            try:
+                self._tmp_dir.cleanup()
+            except OSError:
+                pass
+            self._tmp_dir = None
+
+
 class AgyCliClient:
-    """Runs non-interactive ``agy -p`` calls and translates outputs to OpenAI format."""
+    """Thread-safe pool of warm ``agy acp --stdio`` workers exposing OpenAI chat."""
 
     def __init__(self, config: ProxyConfig) -> None:
         self._config = config
         self._cached_models: list[str] | None = None
-        self._semaphore = (
-            threading.BoundedSemaphore(config.max_concurrency)
-            if config.max_concurrency > 0
-            else None
-        )
-
-    def _concurrency_guard(self):
-        return self._semaphore if self._semaphore is not None else nullcontext()
+        self._max_workers = max(1, config.max_concurrency) if config.max_concurrency >= 0 else 1
+        self._pool: queue.LifoQueue[AgyAcpWorker] = queue.LifoQueue()
+        self._lock = threading.Lock()
+        self._created = 0
+        self._closed = False
 
     def resolve_bin(self) -> str | None:
         """Locate the ``agy`` executable across PATH and standard Windows/Linux dirs."""
@@ -106,9 +316,7 @@ class AgyCliClient:
             return found
 
         if self._config.agy_bin != "agy":
-            if os.path.isfile(self._config.agy_bin):
-                return self._config.agy_bin
-            return None
+            return self._config.agy_bin if os.path.isfile(self._config.agy_bin) else None
 
         candidates: list[str] = []
         if os.name == "nt":
@@ -139,6 +347,38 @@ class AgyCliClient:
             return False
         logger.info("Using official agy CLI binary: %s", resolved)
         return True
+
+    def warm_up(self) -> None:
+        """Pre-start one ACP worker so the first incoming request avoids boot latency."""
+        worker = self._acquire_worker()
+        try:
+            worker.ensure_started()
+        finally:
+            self._release_worker(worker, broken=False)
+
+    def _acquire_worker(self) -> AgyAcpWorker:
+        try:
+            return self._pool.get_nowait()
+        except queue.Empty:
+            pass
+
+        with self._lock:
+            if self._created < self._max_workers:
+                exe = self.resolve_bin()
+                if not exe:
+                    raise AgyCliError(f"`{self._config.agy_bin}` executable not found", status=500)
+                self._created += 1
+                return AgyAcpWorker(exe, self._config)
+
+        return self._pool.get()
+
+    def _release_worker(self, worker: AgyAcpWorker, *, broken: bool) -> None:
+        if self._closed or broken or not worker.is_alive():
+            worker.close()
+            with self._lock:
+                self._created = max(0, self._created - 1)
+            return
+        self._pool.put(worker)
 
     def list_models(self) -> list[str]:
         """Return model IDs reported by ``agy models``, falling back to MODEL_MAP."""
@@ -173,88 +413,19 @@ class AgyCliClient:
 
         return list(MODEL_MAP.keys())
 
-    def _build_command(
-        self,
-        exe: str,
-        prompt: str,
-        model: str,
-        output_format: str,
-    ) -> list[str]:
-        cmd = [
-            exe,
-            "-p",
-            prompt,
-            "--model",
-            model,
-            "--output-format",
-            output_format,
-            "--disable-slash-commands",
-            "--print-timeout",
-            f"{self._config.upstream_timeout}s",
-        ]
-        if self._config.project_id_override:
-            cmd.extend(["--project", self._config.project_id_override])
-        return cmd
-
-    def _work_dir(self) -> tuple[str, tempfile.TemporaryDirectory | None]:
-        if self._config.agy_cwd and os.path.isdir(self._config.agy_cwd):
-            return self._config.agy_cwd, None
-        # Isolate each call in an empty temp dir so workspace files are not loaded.
-        tmp = tempfile.TemporaryDirectory(prefix="agy-proxy-")
-        return tmp.name, tmp
-
     def call_chat(self, body: dict, model: str) -> dict:
-        """Execute ``agy -p --output-format json`` and return an OpenAI response."""
-        exe = self.resolve_bin()
-        if not exe:
-            raise AgyCliError(f"`{self._config.agy_bin}` executable not found", status=500)
+        """Execute a non-streaming OpenAI chat completion via a warm ACP worker."""
+        chunks: list[str] = []
+        usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+        finish_reason = "stop"
 
-        prompt = format_messages_for_agy(body.get("messages") or [])
-        if not prompt:
-            raise AgyCliError("No messages provided", status=400)
-
-        cmd = self._build_command(exe, prompt, model, "json")
-        with self._concurrency_guard():
-            cwd, tmp = self._work_dir()
-            try:
-                proc = subprocess.run(
-                    cmd,
-                    cwd=cwd,
-                    stdin=subprocess.DEVNULL,
-                    capture_output=True,
-                    text=True,
-                    encoding="utf-8",
-                    errors="replace",
-                    timeout=self._config.upstream_timeout + 15,
-                    check=False,
-                    **_platform_subprocess_kwargs(),
-                )
-            except subprocess.TimeoutExpired as exc:
-                raise AgyCliError("agy CLI timed out", status=504) from exc
-            finally:
-                if tmp is not None:
-                    tmp.cleanup()
-
-        if proc.returncode != 0:
-            detail = (proc.stderr or proc.stdout or "").strip()
-            raise AgyCliError(
-                f"agy CLI failed (exit {proc.returncode}): {detail[:500]}",
-                status=502,
-            )
-
-        try:
-            payload = json.loads(proc.stdout)
-        except json.JSONDecodeError as exc:
-            raise AgyCliError(
-                f"agy CLI returned invalid JSON: {proc.stdout[:300]}",
-                status=502,
-            ) from exc
-
-        if payload.get("status") != "SUCCESS":
-            raise AgyCliError(
-                f"agy CLI returned status={payload.get('status')}: {payload}",
-                status=502,
-            )
+        for item in self.stream_chat(body, model):
+            if item.get("text"):
+                chunks.append(item["text"])
+            if "finish_reason" in item:
+                finish_reason = item["finish_reason"]
+            if "usage" in item:
+                usage = item["usage"]
 
         return {
             "id": f"chatcmpl-{uuid.uuid4().hex[:24]}",
@@ -263,89 +434,37 @@ class AgyCliClient:
             "model": body.get("model") or model,
             "choices": [{
                 "index": 0,
-                "message": {
-                    "role": "assistant",
-                    "content": payload.get("response", ""),
-                },
-                "finish_reason": "stop",
+                "message": {"role": "assistant", "content": "".join(chunks)},
+                "finish_reason": finish_reason,
             }],
-            "usage": parse_agy_usage(payload.get("usage")),
+            "usage": usage,
         }
 
     def stream_chat(self, body: dict, model: str) -> Iterator[dict]:
-        """Run ``agy -p --output-format stream-json`` and yield delta/usage dicts."""
-        exe = self.resolve_bin()
-        if not exe:
-            raise AgyCliError(f"`{self._config.agy_bin}` executable not found", status=500)
-
+        """Stream OpenAI delta/usage dicts via a warm ACP worker."""
         prompt = format_messages_for_agy(body.get("messages") or [])
         if not prompt:
             raise AgyCliError("No messages provided", status=400)
 
-        cmd = self._build_command(exe, prompt, model, "stream-json")
-        with self._concurrency_guard():
-            cwd, tmp = self._work_dir()
-            proc = subprocess.Popen(
-                cmd,
-                cwd=cwd,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                bufsize=1,
-                **_platform_subprocess_kwargs(),
-            )
+        worker = self._acquire_worker()
+        broken = False
+        try:
+            yield from worker.stream_prompt(prompt, model)
+        except AgyCliError as exc:
+            broken = exc.status >= 500
+            raise
+        except Exception:
+            broken = True
+            raise
+        finally:
+            self._release_worker(worker, broken=broken)
 
-            emitted_text = False
+    def close(self) -> None:
+        """Shut down all pooled ACP workers and clean up temp directories."""
+        self._closed = True
+        while True:
             try:
-                assert proc.stdout is not None
-                for raw_line in proc.stdout:
-                    line = raw_line.strip()
-                    if not line:
-                        continue
-                    try:
-                        event = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-
-                    etype = event.get("event")
-                    if etype == "step_update":
-                        step = event.get("step_update") or {}
-                        delta_text = step.get("text_delta")
-                        if delta_text:
-                            emitted_text = True
-                            yield {"text": delta_text}
-                    elif etype == "result":
-                        res = event.get("result") or {}
-                        if res.get("status") != "SUCCESS":
-                            raise AgyCliError(
-                                f"agy CLI stream status={res.get('status')}",
-                                status=502,
-                            )
-                        if not emitted_text and res.get("response"):
-                            emitted_text = True
-                            yield {"text": res["response"]}
-                        yield {
-                            "finish_reason": "stop",
-                            "usage": parse_agy_usage(res.get("usage")),
-                        }
-
-                returncode = proc.wait(timeout=15)
-                if returncode != 0:
-                    stderr_text = proc.stderr.read().strip() if proc.stderr else ""
-                    raise AgyCliError(
-                        f"agy CLI stream failed (exit {returncode}): {stderr_text[:500]}",
-                        status=502,
-                    )
-            finally:
-                if proc.poll() is None:
-                    proc.kill()
-                    proc.wait(timeout=5)
-                if proc.stdout is not None:
-                    proc.stdout.close()
-                if proc.stderr is not None:
-                    proc.stderr.close()
-                if tmp is not None:
-                    tmp.cleanup()
+                worker = self._pool.get_nowait()
+            except queue.Empty:
+                break
+            worker.close()

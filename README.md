@@ -229,7 +229,7 @@ python3 antigravity_proxy.py [--port PORT] [--host HOST] [--backend {agy-cli,oau
 
   --port PORT                  Port to listen on (default: 8877)
   --host HOST                  Host to bind to (default: 127.0.0.1)
-  --backend {agy-cli,oauth}    Execution backend: agy-cli (default, official `agy -p` CLI) or oauth (legacy direct API)
+  --backend {agy-cli,oauth}    Execution backend: agy-cli (default, persistent official `agy acp` workers) or oauth (legacy direct API)
   --agy-bin PATH               Path/command for `agy` when using --backend agy-cli (default: agy)
   --agy-cwd DIR                Working directory for agy-cli calls (default: isolated temp dir)
   --max-concurrency N          Max concurrent agy-cli calls, 0 = unlimited (default: 2)

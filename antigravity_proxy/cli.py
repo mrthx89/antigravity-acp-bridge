@@ -129,6 +129,10 @@ def main(argv: list[str] | None = None) -> int:
         agy_client = AgyCliClient(config)
         if not agy_client.preflight_check():
             return 1
+        try:
+            agy_client.warm_up()
+        except Exception as exc:
+            logger.warning("Could not pre-warm ACP worker: %s", exc)
         models_summary = ", ".join(agy_client.list_models())
     else:
         token_manager = TokenManager(config)
@@ -183,6 +187,8 @@ def main(argv: list[str] | None = None) -> int:
     finally:
         if has_sigterm and prev_sigterm is not None:
             signal.signal(signal.SIGTERM, prev_sigterm)
+        if agy_client is not None:
+            agy_client.close()
         server.server_close()
 
     return 0

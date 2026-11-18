@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import queue
+import re
 import shutil
 import subprocess
 import tempfile
@@ -19,7 +20,12 @@ from .translator import content_to_text
 
 logger = logging.getLogger("antigravity_proxy.agy_cli")
 
-_ACP_TIMEOUT_BUFFER = 15
+_TOOL_CALL_TAG = "<openai_tool_calls>"
+_TOOL_CALL_CLOSE_TAG = "</openai_tool_calls>"
+_TOOL_CALL_RE = re.compile(
+    r"<openai_tool_calls>\s*(.*?)\s*</openai_tool_calls>",
+    re.DOTALL,
+)
 
 
 class AgyCliError(Exception):
@@ -43,22 +49,66 @@ def parse_agy_usage(usage_raw: dict | None) -> dict:
     }
 
 
+def _compact_openai_tools(tools: list | None) -> list[dict]:
+    compact: list[dict] = []
+    for tool in tools or []:
+        if not isinstance(tool, dict):
+            continue
+        fn = tool.get("function") if tool.get("type") == "function" else tool
+        if not isinstance(fn, dict) or not fn.get("name"):
+            continue
+        entry: dict = {"name": fn["name"], "description": fn.get("description", "")}
+        if isinstance(fn.get("parameters"), dict) and fn["parameters"]:
+            entry["parameters"] = fn["parameters"]
+        compact.append(entry)
+    return compact
+
+
 def format_messages_for_agy(messages: list[dict]) -> str:
-    """Flatten OpenAI ``messages`` into a single prompt string for ``agy``."""
+    """Flatten OpenAI ``messages`` (including tool call/result turns) into text."""
     system_parts: list[str] = []
-    turns: list[tuple[str, str]] = []
+    turns: list[str] = []
 
     for msg in messages:
         if not isinstance(msg, dict):
             continue
         role = str(msg.get("role", "user")).lower()
         text = content_to_text(msg.get("content"))
-        if not text:
-            continue
+
         if role in ("system", "developer"):
-            system_parts.append(text)
-        else:
-            turns.append((role, text))
+            if text:
+                system_parts.append(text)
+            continue
+
+        if role == "tool":
+            name = msg.get("name") or msg.get("tool_call_id") or "tool"
+            turns.append(f"[Tool Result ({name})]\n{text}")
+            continue
+
+        if role == "assistant":
+            parts: list[str] = []
+            if text:
+                parts.append(text)
+            tcs = msg.get("tool_calls") or []
+            if tcs:
+                compact_tcs = []
+                for tc in tcs:
+                    if not isinstance(tc, dict):
+                        continue
+                    fn = tc.get("function") or {}
+                    compact_tcs.append({
+                        "id": tc.get("id", ""),
+                        "name": fn.get("name", ""),
+                        "arguments": fn.get("arguments", "{}"),
+                    })
+                if compact_tcs:
+                    parts.append(f"{_TOOL_CALL_TAG}{json.dumps(compact_tcs)}{_TOOL_CALL_CLOSE_TAG}")
+            if parts:
+                turns.append("[Assistant]\n" + "\n".join(parts))
+            continue
+
+        if text:
+            turns.append(f"[User]\n{text}" if len(turns) > 0 or system_parts else text)
 
     if not turns:
         return ""
@@ -67,17 +117,86 @@ def format_messages_for_agy(messages: list[dict]) -> str:
     if system_parts:
         sections.append("System instructions:\n" + "\n\n".join(system_parts))
 
-    if len(turns) == 1 and turns[0][0] == "user":
-        sections.append(turns[0][1])
+    if len(turns) == 1 and not turns[0].startswith("["):
+        sections.append(turns[0])
     else:
-        transcript = "\n\n".join(f"[{role.capitalize()}]\n{text}" for role, text in turns)
-        sections.append(
-            "Conversation history:\n"
-            + transcript
-            + "\n\nRespond directly to the latest user message."
-        )
+        sections.append("Conversation history:\n" + "\n\n".join(turns))
 
     return "\n\n".join(sections)
+
+
+def format_request_for_agy(body: dict) -> str:
+    """Build an ACP prompt from an OpenAI chat body, including external tool specs."""
+    base_prompt = format_messages_for_agy(body.get("messages") or [])
+    if not base_prompt:
+        return ""
+
+    tool_choice = body.get("tool_choice")
+    tools = [] if tool_choice == "none" else _compact_openai_tools(body.get("tools"))
+
+    rules = [
+        "CRITICAL RUNTIME RULES:",
+        "1. NEVER invoke any built-in IDE/agent tools (such as run_command, view_file, write_to_file, list_dir, grep_search, find_by_name, etc.). Built-in tool execution is disabled.",
+    ]
+    if tools:
+        rules.append(
+            "2. External OpenAI tools are provided below by the client. When you need to call one or more external tools, respond ONLY with:\n"
+            f'{_TOOL_CALL_TAG}[{{"name": "<tool_name>", "arguments": {{...}}}}]{_TOOL_CALL_CLOSE_TAG}\n'
+            "Do not add prose outside those tags when calling tools."
+        )
+        if tool_choice == "required":
+            rules.append("3. You MUST call at least one external tool from the list below.")
+        elif isinstance(tool_choice, dict) and tool_choice.get("type") == "function":
+            forced_name = (tool_choice.get("function") or {}).get("name")
+            if forced_name:
+                rules.append(f"3. You MUST call the external tool `{forced_name}`.")
+        else:
+            rules.append("3. If no external tool is needed, reply directly in plain text.")
+        rules.append(f"Available external OpenAI tools:\n{json.dumps(tools, ensure_ascii=False)}")
+    else:
+        rules.append("2. Respond directly in plain text without calling any tools.")
+
+    return "\n".join(rules) + "\n\n" + base_prompt
+
+
+def parse_openai_tool_calls(text: str) -> tuple[str | None, list[dict]]:
+    """Extract ``<openai_tool_calls>...</openai_tool_calls>`` into OpenAI format."""
+    match = _TOOL_CALL_RE.search(text)
+    if not match:
+        return (text, [])
+
+    raw_json = match.group(1).strip()
+    try:
+        parsed = json.loads(raw_json)
+    except json.JSONDecodeError:
+        return (text, [])
+
+    if isinstance(parsed, dict):
+        parsed = [parsed]
+    if not isinstance(parsed, list):
+        return (text, [])
+
+    tool_calls: list[dict] = []
+    for item in parsed:
+        if not isinstance(item, dict):
+            continue
+        fn = item.get("function") if isinstance(item.get("function"), dict) else item
+        name = fn.get("name")
+        if not name:
+            continue
+        args = fn.get("arguments", {})
+        args_str = json.dumps(args) if isinstance(args, (dict, list)) else str(args)
+        tool_calls.append({
+            "id": f"call_{uuid.uuid4().hex[:24]}",
+            "type": "function",
+            "function": {"name": name, "arguments": args_str},
+        })
+
+    if not tool_calls:
+        return (text, [])
+
+    remaining = (text[: match.start()] + text[match.end() :]).strip()
+    return (remaining or None, tool_calls)
 
 
 def _platform_subprocess_kwargs() -> dict:
@@ -160,6 +279,24 @@ class AgyAcpWorker:
         except OSError as exc:
             raise AgyCliError(f"Failed writing to agy ACP stdin: {exc}", status=502) from exc
 
+    def _reply_permission_denied(self, msg: dict) -> None:
+        options = (msg.get("params") or {}).get("options") or []
+        reject_id = next(
+            (
+                opt.get("optionId")
+                for opt in options
+                if "reject" in str(opt.get("kind", "")).lower()
+                or "deny" in str(opt.get("optionId", "")).lower()
+            ),
+            None,
+        )
+        outcome = (
+            {"outcome": "selected", "optionId": reject_id}
+            if reject_id
+            else {"outcome": "cancelled"}
+        )
+        self._write_json({"jsonrpc": "2.0", "id": msg["id"], "result": {"outcome": outcome}})
+
     def _read_until_response(self, req_id: int) -> Iterator[dict]:
         """Yield notification updates until the JSON-RPC response for ``req_id`` arrives."""
         assert self._proc is not None and self._proc.stdout is not None
@@ -187,16 +324,9 @@ class AgyAcpWorker:
                 yield {"__rpc_result__": msg.get("result") or {}}
                 return
 
-            # Reject any server-initiated tool permission requests immediately.
             if "id" in msg and "method" in msg:
-                self._write_json({
-                    "jsonrpc": "2.0",
-                    "id": msg["id"],
-                    "error": {
-                        "code": -32000,
-                        "message": "Tool execution is disabled in proxy mode",
-                    },
-                })
+                self._reply_permission_denied(msg)
+                yield {"__permission_denied__": True}
                 continue
 
             if msg.get("method") == "session/update":
@@ -215,7 +345,41 @@ class AgyAcpWorker:
                 return item["__rpc_result__"]
         return {}
 
-    def stream_prompt(self, prompt: str, model: str) -> Iterator[dict]:
+    def _run_prompt_turn(
+        self,
+        session_id: str,
+        prompt_text: str,
+    ) -> Iterator[dict]:
+        req_id = self._next_id()
+        self._write_json({
+            "jsonrpc": "2.0",
+            "id": req_id,
+            "method": "session/prompt",
+            "params": {
+                "sessionId": session_id,
+                "prompt": [{"type": "text", "text": prompt_text}],
+            },
+        })
+        for item in self._read_until_response(req_id):
+            if "__rpc_result__" in item:
+                yield item
+                return
+            if item.get("__permission_denied__"):
+                yield item
+                continue
+            upd = (item.get("params") or {}).get("update") or {}
+            if upd.get("sessionUpdate") == "agent_message_chunk":
+                content = upd.get("content") or {}
+                if content.get("type") == "text" and content.get("text"):
+                    yield {"text": content["text"]}
+
+    def stream_prompt(
+        self,
+        prompt: str,
+        model: str,
+        *,
+        has_external_tools: bool = False,
+    ) -> Iterator[dict]:
         """Run one isolated ACP session and yield ``text`` and final ``usage`` dicts."""
         self.ensure_started()
         assert self._cwd is not None
@@ -233,31 +397,46 @@ class AgyAcpWorker:
                 except AgyCliError as exc:
                     raise AgyCliError(f"Invalid or unavailable model '{model}': {exc}", status=400) from exc
 
-            req_id = self._next_id()
-            self._write_json({
-                "jsonrpc": "2.0",
-                "id": req_id,
-                "method": "session/prompt",
-                "params": {
-                    "sessionId": session_id,
-                    "prompt": [{"type": "text", "text": prompt}],
-                },
-            })
+            emitted_text = False
+            saw_denied_tool = False
+            final_result: dict = {}
 
-            for item in self._read_until_response(req_id):
+            for item in self._run_prompt_turn(session_id, prompt):
                 if "__rpc_result__" in item:
-                    result = item["__rpc_result__"]
-                    yield {
-                        "finish_reason": "stop",
-                        "usage": parse_agy_usage(result.get("usage")),
-                    }
-                    break
+                    final_result = item["__rpc_result__"]
+                elif item.get("__permission_denied__"):
+                    saw_denied_tool = True
+                elif item.get("text"):
+                    emitted_text = True
+                    yield {"text": item["text"]}
 
-                upd = (item.get("params") or {}).get("update") or {}
-                if upd.get("sessionUpdate") == "agent_message_chunk":
-                    content = upd.get("content") or {}
-                    if content.get("type") == "text" and content.get("text"):
-                        yield {"text": content["text"]}
+            # If agy attempted a built-in tool and ended with zero text, ask once in-session
+            # for a plain-text or <openai_tool_calls> reply so clients don't get empty responses.
+            if not emitted_text:
+                recovery_prompt = (
+                    f"Built-in tools are disabled. Output your response in plain text or use {_TOOL_CALL_TAG}...{_TOOL_CALL_CLOSE_TAG} from the provided external tools."
+                    if has_external_tools
+                    else "Built-in tools are disabled here. Please answer directly in plain text without invoking any tools."
+                )
+                for item in self._run_prompt_turn(session_id, recovery_prompt):
+                    if "__rpc_result__" in item:
+                        final_result = item["__rpc_result__"]
+                    elif item.get("text"):
+                        emitted_text = True
+                        yield {"text": item["text"]}
+
+            if not emitted_text:
+                fallback = (
+                    "Unable to execute built-in tools in proxy mode; please rephrase or enable client tools."
+                    if saw_denied_tool
+                    else "Model completed without text output."
+                )
+                yield {"text": fallback}
+
+            yield {
+                "finish_reason": "stop",
+                "usage": parse_agy_usage(final_result.get("usage")),
+            }
         finally:
             if self.is_alive():
                 try:
@@ -418,14 +597,22 @@ class AgyCliClient:
         chunks: list[str] = []
         usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
         finish_reason = "stop"
+        tool_calls: list[dict] = []
 
         for item in self.stream_chat(body, model):
             if item.get("text"):
                 chunks.append(item["text"])
+            if item.get("tool_calls"):
+                tool_calls.extend(item["tool_calls"])
             if "finish_reason" in item:
                 finish_reason = item["finish_reason"]
             if "usage" in item:
                 usage = item["usage"]
+
+        text = "".join(chunks) if chunks else None
+        message: dict = {"role": "assistant", "content": text}
+        if tool_calls:
+            message["tool_calls"] = tool_calls
 
         return {
             "id": f"chatcmpl-{uuid.uuid4().hex[:24]}",
@@ -434,22 +621,77 @@ class AgyCliClient:
             "model": body.get("model") or model,
             "choices": [{
                 "index": 0,
-                "message": {"role": "assistant", "content": "".join(chunks)},
+                "message": message,
                 "finish_reason": finish_reason,
             }],
             "usage": usage,
         }
 
     def stream_chat(self, body: dict, model: str) -> Iterator[dict]:
-        """Stream OpenAI delta/usage dicts via a warm ACP worker."""
-        prompt = format_messages_for_agy(body.get("messages") or [])
+        """Stream OpenAI delta/tool_call/usage dicts via a warm ACP worker."""
+        prompt = format_request_for_agy(body)
         if not prompt:
             raise AgyCliError("No messages provided", status=400)
+
+        has_external_tools = bool(
+            body.get("tool_choice") != "none" and _compact_openai_tools(body.get("tools"))
+        )
 
         worker = self._acquire_worker()
         broken = False
         try:
-            yield from worker.stream_prompt(prompt, model)
+            raw_gen = worker.stream_prompt(
+                prompt, model, has_external_tools=has_external_tools
+            )
+            if not has_external_tools:
+                yield from raw_gen
+                return
+
+            # When external tools exist, hold leading text only while it could be <openai_tool_calls>.
+            buf = ""
+            streaming_plain = False
+            emitted_tool_calls = False
+            for item in raw_gen:
+                if item.get("text"):
+                    if streaming_plain:
+                        yield item
+                        continue
+                    buf += item["text"]
+                    stripped = buf.lstrip()
+                    if not stripped:
+                        continue
+                    if _TOOL_CALL_TAG.startswith(stripped) or stripped.startswith(_TOOL_CALL_TAG):
+                        if _TOOL_CALL_CLOSE_TAG in buf:
+                            rem, tcs = parse_openai_tool_calls(buf)
+                            buf = ""
+                            if tcs:
+                                indexed = [dict(tc, index=i) for i, tc in enumerate(tcs)]
+                                if rem:
+                                    yield {"text": rem}
+                                emitted_tool_calls = True
+                                yield {"tool_calls": indexed}
+                                streaming_plain = True
+                            else:
+                                streaming_plain = True
+                        continue
+                    # Clearly not a <openai_tool_calls> block; flush immediately.
+                    streaming_plain = True
+                    yield {"text": buf}
+                    buf = ""
+                elif "finish_reason" in item:
+                    if buf:
+                        rem, tcs = parse_openai_tool_calls(buf)
+                        if tcs:
+                            indexed = [dict(tc, index=i) for i, tc in enumerate(tcs)]
+                            if rem:
+                                yield {"text": rem}
+                            emitted_tool_calls = True
+                            yield {"tool_calls": indexed}
+                        else:
+                            yield {"text": buf}
+                    if emitted_tool_calls:
+                        item = dict(item, finish_reason="tool_calls")
+                    yield item
         except AgyCliError as exc:
             broken = exc.status >= 500
             raise

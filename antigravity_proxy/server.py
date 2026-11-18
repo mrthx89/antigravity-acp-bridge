@@ -607,7 +607,17 @@ class ProxyHandler(BaseHTTPRequestHandler):
                     )
                     if not self._send_sse_json(chunk):
                         return
-                if "finish_reason" in item:
+                if item.get("tool_calls"):
+                    finish_reason = "tool_calls"
+                    chunk = self._make_stream_chunk(
+                        completion_id,
+                        created,
+                        openai_model,
+                        {"tool_calls": item["tool_calls"]},
+                    )
+                    if not self._send_sse_json(chunk):
+                        return
+                if "finish_reason" in item and finish_reason != "tool_calls":
                     finish_reason = item["finish_reason"]
                 if "usage" in item:
                     usage = item["usage"]

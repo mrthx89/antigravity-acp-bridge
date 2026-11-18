@@ -15,7 +15,9 @@ from antigravity_proxy.agy_cli import (
     AgyAcpWorker,
     AgyCliClient,
     format_messages_for_agy,
+    format_request_for_agy,
     parse_agy_usage,
+    parse_openai_tool_calls,
 )
 from antigravity_proxy.config import ProxyConfig
 from antigravity_proxy.server import ProxyHTTPServer
@@ -245,10 +247,87 @@ class AgyCliBackendTests(unittest.TestCase):
         self.assertEqual(methods.count("session/set_model"), 2)
         self.assertEqual(methods.count("session/close"), 2)
 
-        # Server-initiated permission request id=999 must be rejected on both calls.
-        perm_replies = [m for m in fake_proc.sent if m.get("id") == 999 and "error" in m]
+        # Server-initiated permission request id=999 must be rejected via ACP outcome.
+        perm_replies = [m for m in fake_proc.sent if m.get("id") == 999 and "result" in m]
         self.assertEqual(len(perm_replies), 2)
+        self.assertEqual(perm_replies[0]["result"]["outcome"]["outcome"], "cancelled")
         self.assertTrue(fake_proc.terminated)
+
+    def test_tool_call_bridging_format_and_parse(self) -> None:
+        body = {
+            "messages": [
+                {"role": "user", "content": "cek server"},
+                {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {"id": "call_1", "type": "function", "function": {"name": "terminal", "arguments": '{"command":"uptime"}'}}
+                    ],
+                },
+                {"role": "tool", "tool_call_id": "call_1", "name": "terminal", "content": "up 3 days"},
+            ],
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {"name": "terminal", "description": "Run cmd", "parameters": {"type": "object"}},
+                }
+            ],
+        }
+        prompt = format_request_for_agy(body)
+        self.assertIn("CRITICAL RUNTIME RULES", prompt)
+        self.assertIn("[Tool Result (terminal)]", prompt)
+        self.assertIn("up 3 days", prompt)
+
+        rem, tcs = parse_openai_tool_calls(
+            '<openai_tool_calls>[{"name": "terminal", "arguments": {"command": "free -h"}}]</openai_tool_calls>'
+        )
+        self.assertIsNone(rem)
+        self.assertEqual(len(tcs), 1)
+        self.assertEqual(tcs[0]["function"]["name"], "terminal")
+        self.assertEqual(json.loads(tcs[0]["function"]["arguments"]), {"command": "free -h"})
+
+    def test_acp_empty_response_triggers_recovery_turn(self) -> None:
+        class _RecoveryProc(_FakeAcpProcess):
+            def handle_request(self, obj: dict) -> None:
+                if obj.get("method") == "session/prompt":
+                    self.sent.append(obj)
+                    sid = obj["params"]["sessionId"]
+                    req_id = obj["id"]
+                    prompt_txt = obj["params"]["prompt"][0]["text"]
+                    if "Built-in tools are disabled here." in prompt_txt:
+                        self._responses.extend([
+                            json.dumps({
+                                "jsonrpc": "2.0",
+                                "method": "session/update",
+                                "params": {
+                                    "sessionId": sid,
+                                    "update": {
+                                        "sessionUpdate": "agent_message_chunk",
+                                        "content": {"type": "text", "text": "Recovered answer"},
+                                    },
+                                },
+                            }),
+                            json.dumps({"jsonrpc": "2.0", "id": req_id, "result": {"stopReason": "end_turn", "usage": {"inputTokens": 10, "outputTokens": 2, "totalTokens": 12}}}),
+                        ])
+                    else:
+                        self._responses.extend([
+                            json.dumps({"jsonrpc": "2.0", "id": 888, "method": "session/request_permission", "params": {"options": [{"optionId": "deny", "kind": "reject_once"}]}}),
+                            json.dumps({"jsonrpc": "2.0", "id": req_id, "result": {"stopReason": "end_turn", "usage": {"inputTokens": 10, "outputTokens": 1, "totalTokens": 11}}}),
+                        ])
+                else:
+                    super().handle_request(obj)
+
+        fake_proc = _RecoveryProc()
+        client = AgyCliClient(ProxyConfig(backend="agy-cli", max_concurrency=1))
+        with patch("antigravity_proxy.agy_cli.shutil.which", return_value="agy"), patch(
+            "antigravity_proxy.agy_cli.subprocess.Popen", return_value=fake_proc
+        ):
+            resp = client.call_chat(
+                {"messages": [{"role": "user", "content": "cek server"}]},
+                "gemini-3.8-flash-high",
+            )
+            client.close()
+        self.assertEqual(resp["choices"][0]["message"]["content"], "Recovered answer")
 
     def test_server_routes_in_agy_cli_mode(self) -> None:
         agy_client = MagicMock()

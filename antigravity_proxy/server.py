@@ -5,6 +5,7 @@ from __future__ import annotations
 import hmac
 import json
 import logging
+import os
 import re
 import time
 import traceback
@@ -12,6 +13,7 @@ import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse
 
+from .agy_cli import AgyCliClient, AgyCliError, format_messages_for_agy
 from .auth import ProjectResolver, TokenManager
 from .config import DEFAULT_MODEL, MAX_REQUEST_BODY_BYTES, MODEL_MAP, ProxyConfig
 from .translator import (
@@ -35,19 +37,23 @@ class ProxyHTTPServer(ThreadingHTTPServer):
     """ThreadingHTTPServer carrying shared config, auth, and upstream dependencies."""
 
     daemon_threads = True
+    # Enable SO_REUSEADDR on POSIX for fast restarts; disable on Windows to prevent port hijacking.
+    allow_reuse_address = os.name != "nt"
 
     def __init__(
         self,
         server_address: tuple[str, int],
         config: ProxyConfig,
-        token_manager: TokenManager,
-        project_resolver: ProjectResolver,
-        upstream_client: UpstreamClient,
+        token_manager: TokenManager | None = None,
+        project_resolver: ProjectResolver | None = None,
+        upstream_client: UpstreamClient | None = None,
+        agy_client: AgyCliClient | None = None,
     ) -> None:
         self.config = config
         self.token_manager = token_manager
         self.project_resolver = project_resolver
         self.upstream_client = upstream_client
+        self.agy_client = agy_client
         super().__init__(server_address, ProxyHandler)
 
 
@@ -281,13 +287,26 @@ class ProxyHandler(BaseHTTPRequestHandler):
 
     def _handle_models(self) -> None:
         now = int(time.time())
+        if self._proxy.config.backend == "agy-cli" and self._proxy.agy_client is not None:
+            model_ids = self._proxy.agy_client.list_models()
+        else:
+            model_ids = list(MODEL_MAP.keys())
         models = [
             {"id": name, "object": "model", "created": now, "owned_by": "google"}
-            for name in MODEL_MAP
+            for name in model_ids
         ]
         self._send_json(200, {"object": "list", "data": models})
 
     def _handle_gemini_passthrough(self, path: str) -> None:
+        if self._proxy.config.backend == "agy-cli":
+            self._send_error_json(
+                "not_implemented",
+                "Native Gemini passthrough requires --backend oauth",
+                err_type="invalid_request_error",
+                http_code=501,
+            )
+            return
+
         body = self._read_body()
         if body is None:
             return
@@ -343,6 +362,24 @@ class ProxyHandler(BaseHTTPRequestHandler):
         backend_model, thinking_level = MODEL_MAP.get(
             openai_model, (openai_model, None)
         )
+
+        if self._proxy.config.backend == "agy-cli":
+            if self._proxy.agy_client is None:
+                self._send_error_json("internal_error", "agy-cli backend is not initialized", http_code=500)
+                return
+            if not format_messages_for_agy(body.get("messages") or []):
+                self._send_error_json(
+                    "invalid_request",
+                    "No messages provided",
+                    err_type="invalid_request_error",
+                    http_code=400,
+                )
+                return
+            if stream:
+                self._handle_agy_stream(body, backend_model, openai_model)
+            else:
+                self._handle_agy_nonstream(body, backend_model)
+            return
 
         try:
             project_id = self._proxy.project_resolver.get_project_id()
@@ -505,7 +542,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
         self._send_sse_done()
         return True
 
-    def _handle_stream(self, envelope: dict, openai_model: str) -> None:
+    def _start_sse_stream(self, openai_model: str) -> tuple[str, int] | None:
         completion_id = f"chatcmpl-{uuid.uuid4().hex[:24]}"
         created = int(time.time())
         self._last_status = 200
@@ -520,7 +557,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
             self.end_headers()
             self.close_connection = True
         except Exception:
-            return
+            return None
 
         first_chunk = self._make_stream_chunk(
             completion_id,
@@ -529,7 +566,79 @@ class ProxyHandler(BaseHTTPRequestHandler):
             {"role": "assistant", "content": ""},
         )
         if not self._send_sse_json(first_chunk):
+            return None
+        return (completion_id, created)
+
+    def _handle_agy_nonstream(self, body: dict, backend_model: str) -> None:
+        assert self._proxy.agy_client is not None
+        try:
+            openai_resp = self._proxy.agy_client.call_chat(body, backend_model)
+        except AgyCliError as exc:
+            err_type = "invalid_request_error" if exc.status == 400 else "api_error"
+            self._send_error_json("agy_cli_error", str(exc), err_type=err_type, http_code=exc.status)
             return
+        except Exception as exc:
+            self._send_error_json("agy_cli_error", f"agy CLI call failed: {exc}", http_code=502)
+            return
+        self._send_json(200, openai_resp)
+
+    def _handle_agy_stream(
+        self,
+        body: dict,
+        backend_model: str,
+        openai_model: str,
+    ) -> None:
+        assert self._proxy.agy_client is not None
+        started = self._start_sse_stream(openai_model)
+        if not started:
+            return
+        completion_id, created = started
+
+        finish_reason = "stop"
+        usage = None
+        try:
+            for item in self._proxy.agy_client.stream_chat(body, backend_model):
+                if item.get("text"):
+                    chunk = self._make_stream_chunk(
+                        completion_id,
+                        created,
+                        openai_model,
+                        {"content": item["text"]},
+                    )
+                    if not self._send_sse_json(chunk):
+                        return
+                if "finish_reason" in item:
+                    finish_reason = item["finish_reason"]
+                if "usage" in item:
+                    usage = item["usage"]
+            final_chunk = self._make_stream_chunk(
+                completion_id,
+                created,
+                openai_model,
+                {},
+                finish_reason=finish_reason,
+                usage=usage,
+            )
+            self._send_sse_json(final_chunk)
+            self._send_sse_done()
+        except Exception as exc:
+            logger.error("agy-cli streaming error: %s", exc)
+            self._send_sse_json(
+                self._make_stream_chunk(
+                    completion_id,
+                    created,
+                    openai_model,
+                    {"content": f"[Error: {exc}]"},
+                    finish_reason="stop",
+                )
+            )
+            self._send_sse_done()
+
+    def _handle_stream(self, envelope: dict, openai_model: str) -> None:
+        started = self._start_sse_stream(openai_model)
+        if not started:
+            return
+        completion_id, created = started
 
         try:
             gen = self._proxy.upstream_client.stream_generate_content(envelope)

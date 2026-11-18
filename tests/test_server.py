@@ -49,7 +49,7 @@ class ServerIntegrationTests(unittest.TestCase):
         }
         upstream.stream_generate_content.side_effect = UpstreamError("bad stream", status=400)
 
-        cfg = ProxyConfig(api_key="secret-123", cors_origins="https://ui.example.com")
+        cfg = ProxyConfig(backend="oauth", api_key="secret-123", cors_origins="https://ui.example.com")
         server, thread = self._start_server(cfg, upstream)
         port = server.server_address[1]
         try:

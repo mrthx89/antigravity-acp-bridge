@@ -225,10 +225,14 @@ The AI will read `AGENTS.md` and guide you through every step: prerequisites che
 ### CLI Arguments
 
 ```
-python3 antigravity_proxy.py [--port PORT] [--host HOST] [--api-key KEY] [--cors-origin ORIGINS]
+python3 antigravity_proxy.py [--port PORT] [--host HOST] [--backend {agy-cli,oauth}] [--api-key KEY] [--cors-origin ORIGINS]
 
   --port PORT                  Port to listen on (default: 8877)
   --host HOST                  Host to bind to (default: 127.0.0.1)
+  --backend {agy-cli,oauth}    Execution backend: agy-cli (default, official `agy -p` CLI) or oauth (legacy direct API)
+  --agy-bin PATH               Path/command for `agy` when using --backend agy-cli (default: agy)
+  --agy-cwd DIR                Working directory for agy-cli calls (default: isolated temp dir)
+  --max-concurrency N          Max concurrent agy-cli calls, 0 = unlimited (default: 2)
   --api-key KEY                Require Bearer / x-api-key auth on API routes
   --allow-unauthenticated      Allow non-localhost binding without --api-key (unsafe)
   --cors-origin ORIGINS        CORS Allow-Origin header or comma-separated list (default: *)
@@ -260,6 +264,10 @@ systemctl --user status antigravity-proxy
 |------------------------------|----------|----------------------------------------------|
 | `ANTIGRAVITY_PROXY_HOST`     | `127.0.0.1` | Default bind host                         |
 | `ANTIGRAVITY_PROXY_PORT`     | `8877`   | Default bind port                            |
+| `ANTIGRAVITY_BACKEND`        | `agy-cli`| Backend mode: `agy-cli` (official) or `oauth`|
+| `ANTIGRAVITY_AGY_BIN`        | `agy`    | `agy` executable for `agy-cli` backend       |
+| `ANTIGRAVITY_AGY_CWD`        | temp dir | Working directory for `agy-cli` calls        |
+| `ANTIGRAVITY_MAX_CONCURRENCY`| `2`      | Max concurrent `agy-cli` workers (`0`=unlim) |
 | `ANTIGRAVITY_PROXY_API_KEY`  | unset    | API key required via Bearer or `x-api-key`   |
 | `ANTIGRAVITY_CORS_ORIGINS`   | `*`      | Allowed CORS origins (`none` to disable)     |
 | `ANTIGRAVITY_TOKEN_FILE`     | `~/.gemini/antigravity-cli/antigravity-oauth-token` | Override OAuth token file path |

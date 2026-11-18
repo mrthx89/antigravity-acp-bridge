@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import logging
+import signal
 import sys
+import threading
 from argparse import ArgumentParser
 
+from .agy_cli import AgyCliClient
 from .auth import ProjectResolver, TokenManager
 from .config import MODEL_MAP, ProxyConfig
 from .server import ProxyHTTPServer
@@ -42,6 +45,28 @@ def build_arg_parser() -> ArgumentParser:
         help="Host to bind to (default: 127.0.0.1 or ANTIGRAVITY_PROXY_HOST)",
     )
     parser.add_argument(
+        "--backend",
+        choices=["agy-cli", "oauth"],
+        default=None,
+        help="Execution backend: agy-cli (default, official local agy CLI) or oauth (legacy direct API)",
+    )
+    parser.add_argument(
+        "--agy-bin",
+        default=None,
+        help="Path or command name for agy executable when using --backend agy-cli (default: agy)",
+    )
+    parser.add_argument(
+        "--agy-cwd",
+        default=None,
+        help="Working directory for agy-cli calls (default: isolated empty temp directory)",
+    )
+    parser.add_argument(
+        "--max-concurrency",
+        type=int,
+        default=None,
+        help="Max concurrent agy-cli subprocesses, 0 for unlimited (default: 2)",
+    )
+    parser.add_argument(
         "--api-key",
         default=None,
         help="Require Bearer / x-api-key auth on API routes (or ANTIGRAVITY_PROXY_API_KEY)",
@@ -73,9 +98,13 @@ def main(argv: list[str] | None = None) -> int:
     config = ProxyConfig.from_env(
         host=args.host,
         port=args.port,
+        backend=args.backend,
         api_key=args.api_key,
         allow_unauthenticated=args.allow_unauthenticated,
         cors_origins=args.cors_origin,
+        agy_bin=args.agy_bin,
+        agy_cwd=args.agy_cwd,
+        max_concurrency=args.max_concurrency,
     )
 
     if not config.is_localhost and not config.api_key:
@@ -91,32 +120,60 @@ def main(argv: list[str] | None = None) -> int:
             config.host,
         )
 
-    token_manager = TokenManager(config)
-    if not token_manager.preflight_check():
-        return 1
+    token_manager = None
+    project_resolver = None
+    upstream_client = None
+    agy_client = None
 
-    project_resolver = ProjectResolver(config, token_manager)
-    try:
-        project_resolver.get_project_id()
-    except Exception as exc:
-        logger.warning("Could not pre-discover project ID: %s", exc)
-        logger.info("Project ID will be discovered on the first request.")
+    if config.backend == "agy-cli":
+        agy_client = AgyCliClient(config)
+        if not agy_client.preflight_check():
+            return 1
+        models_summary = ", ".join(agy_client.list_models())
+    else:
+        token_manager = TokenManager(config)
+        if not token_manager.preflight_check():
+            return 1
 
-    upstream_client = UpstreamClient(token_manager, timeout=config.upstream_timeout)
+        project_resolver = ProjectResolver(config, token_manager)
+        try:
+            project_resolver.get_project_id()
+        except Exception as exc:
+            logger.warning("Could not pre-discover project ID: %s", exc)
+            logger.info("Project ID will be discovered on the first request.")
+
+        upstream_client = UpstreamClient(token_manager, timeout=config.upstream_timeout)
+        models_summary = ", ".join(MODEL_MAP.keys())
+
     server = ProxyHTTPServer(
         (config.host, config.port),
         config,
-        token_manager,
-        project_resolver,
-        upstream_client,
+        token_manager=token_manager,
+        project_resolver=project_resolver,
+        upstream_client=upstream_client,
+        agy_client=agy_client,
     )
 
     logger.info("Antigravity proxy listening on http://%s:%s/v1", config.host, config.port)
-    logger.info("  Auth:   %s", "Bearer/x-api-key enabled" if config.api_key else "disabled (localhost mode)")
-    logger.info("  CORS:   %s", config.cors_origins)
-    logger.info("  Models: %s", ", ".join(MODEL_MAP.keys()))
-    logger.info("  Token:  %s", config.token_file)
+    logger.info("  Platform: %s", sys.platform)
+    logger.info("  Backend:  %s", config.backend)
+    logger.info("  Auth:     %s", "Bearer/x-api-key enabled" if config.api_key else "disabled (localhost mode)")
+    logger.info("  CORS:     %s", config.cors_origins)
+    logger.info("  Models:   %s", models_summary)
+    if config.backend == "agy-cli":
+        logger.info("  Workers:  max_concurrency=%s", config.max_concurrency or "unlimited")
+    else:
+        logger.info("  Token:    %s", config.token_file)
     logger.info("  Press Ctrl+C to stop")
+
+    prev_sigterm = None
+    has_sigterm = hasattr(signal, "SIGTERM") and threading.current_thread() is threading.main_thread()
+    if has_sigterm:
+        def _handle_sigterm(signum, frame):
+            logger.info("Received SIGTERM, shutting down...")
+            threading.Thread(target=server.shutdown, daemon=True).start()
+
+        prev_sigterm = signal.signal(signal.SIGTERM, _handle_sigterm)
 
     try:
         server.serve_forever()
@@ -124,6 +181,8 @@ def main(argv: list[str] | None = None) -> int:
         logger.info("Shutting down...")
         server.shutdown()
     finally:
+        if has_sigterm and prev_sigterm is not None:
+            signal.signal(signal.SIGTERM, prev_sigterm)
         server.server_close()
 
     return 0

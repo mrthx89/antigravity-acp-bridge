@@ -8,6 +8,7 @@ ExecStart=/usr/bin/python3 %h/antigravity-proxy/antigravity_proxy.py --port 8877
 Restart=on-failure
 RestartSec=5
 Environment=HOME=%h
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
 
 [Install]
 WantedBy=default.target

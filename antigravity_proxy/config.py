@@ -12,8 +12,8 @@ DEFAULT_CLIENT_ID = (
 )
 DEFAULT_CLIENT_SECRET = "GOCSPX-K58FWR486LdL" "J1mLB8sXC4z6qDAf"
 
-DEFAULT_TOKEN_FILE = os.path.expanduser(
-    "~/.gemini/antigravity-cli/antigravity-oauth-token"
+DEFAULT_TOKEN_FILE = os.path.normpath(
+    os.path.expanduser("~/.gemini/antigravity-cli/antigravity-oauth-token")
 )
 OAUTH_TOKEN_URL = "https://oauth2.googleapis.com/token"
 CLOUDCODE_BASE = "https://daily-cloudcode-pa.googleapis.com"
@@ -121,6 +121,7 @@ class ProxyConfig:
 
     host: str = "127.0.0.1"
     port: int = 8877
+    backend: str = "agy-cli"
     api_key: str | None = None
     allow_unauthenticated: bool = False
     cors_origins: str = "*"
@@ -129,6 +130,9 @@ class ProxyConfig:
     client_secret: str = DEFAULT_CLIENT_SECRET
     project_id_override: str | None = None
     upstream_timeout: int = UPSTREAM_TIMEOUT
+    agy_bin: str = "agy"
+    agy_cwd: str | None = None
+    max_concurrency: int = 2
 
     @property
     def is_localhost(self) -> bool:
@@ -141,16 +145,22 @@ class ProxyConfig:
         defaults = {
             "host": os.environ.get("ANTIGRAVITY_PROXY_HOST", "127.0.0.1"),
             "port": int(os.environ.get("ANTIGRAVITY_PROXY_PORT", "8877")),
+            "backend": os.environ.get("ANTIGRAVITY_BACKEND", "agy-cli"),
             "api_key": os.environ.get("ANTIGRAVITY_PROXY_API_KEY") or None,
             "cors_origins": os.environ.get("ANTIGRAVITY_CORS_ORIGINS", "*"),
-            "token_file": os.path.expanduser(
-                os.environ.get("ANTIGRAVITY_TOKEN_FILE", DEFAULT_TOKEN_FILE)
+            "token_file": os.path.normpath(
+                os.path.expanduser(
+                    os.environ.get("ANTIGRAVITY_TOKEN_FILE", DEFAULT_TOKEN_FILE)
+                )
             ),
             "client_id": os.environ.get("ANTIGRAVITY_CLIENT_ID", DEFAULT_CLIENT_ID),
             "client_secret": os.environ.get(
                 "ANTIGRAVITY_CLIENT_SECRET", DEFAULT_CLIENT_SECRET
             ),
             "project_id_override": os.environ.get("ANTIGRAVITY_PROJECT_ID") or None,
+            "agy_bin": os.environ.get("ANTIGRAVITY_AGY_BIN", "agy"),
+            "agy_cwd": os.environ.get("ANTIGRAVITY_AGY_CWD") or None,
+            "max_concurrency": int(os.environ.get("ANTIGRAVITY_MAX_CONCURRENCY", "2")),
         }
         defaults.update({k: v for k, v in overrides.items() if v is not None})
         return cls(**defaults)

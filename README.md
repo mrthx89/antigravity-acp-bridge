@@ -17,30 +17,28 @@
 
 ## What is this?
 
-A lightweight **OpenAI-compatible proxy** that bridges any AI tool to **Google Antigravity's** internal Cloud Code Assist API. Authenticate once with the [Antigravity CLI](https://antigravity.google/), then use **Gemini** and **Claude** models from any OpenAI-compatible client — **no API key, no billing, no credit card**.
+A lightweight **OpenAI-compatible proxy** that bridges OpenAI-compatible clients to Google Antigravity via the official **`agy` CLI (`agy acp --stdio`)** by default (no OAuth token extraction or header spoofing), with optional legacy `oauth` mode. Authenticate once with the [Antigravity CLI](https://antigravity.google/), then use **Gemini** and **Claude** models from any OpenAI-compatible client.
 
 ```
-Your Tool (OpenAI format)  →  Antigravity Proxy (localhost:8877)  →  Gemini / Claude models
+Your Tool (OpenAI format)  →  Antigravity Proxy (localhost:8877)  →  Official `agy acp` worker  →  Gemini / Claude models
 ```
 
 ### Why use this?
 
-- **Free** — uses the OAuth token from the Antigravity CLI, no paid API key
-- **Universal** — works with any OpenAI-compatible tool (Aider, Continue, Hermes, Claude Code, OpenAI SDK, LangChain, etc.)
-- **No dependencies** — pure Python stdlib, no `pip install` needed
-- **Two endpoints** — OpenAI chat completions + native Gemini passthrough (for images & structured output)
-- **Tool/function calling** — full support, including round-trip through conversation history
-- **Streaming** — SSE streaming support for real-time token generation
+- **Uses the official `agy` binary by default** — warm persistent `agy acp --stdio` workers (`--backend agy-cli`), no OAuth token harvesting
+- **Cross-platform** — runs on **Windows** and **Linux** (includes systemd user unit)
+- **External-access ready** — built-in Bearer / `x-api-key` authentication, CORS headers, and `--max-concurrency` worker limit
+- **Zero dependencies** — pure Python 3.10+ stdlib, no `pip install` needed
+- **Streaming** — SSE streaming support (`"stream": true`) for real-time token generation
 
 ---
 
 ## Features
 
-- **OpenAI-compatible** `POST /v1/chat/completions` — streaming + non-streaming
-- **Native Gemini passthrough** `POST /v1beta/models/{model}:generateContent` — images, structured JSON output
-- **Tool/function calling** — OpenAI tools format → Gemini functionDeclarations, with round-trip encoding
-- **Model auto-mapping** — use friendly names (`gemini-3.8-flash-high`), the proxy translates to backend names automatically
-- **OAuth token auto-refresh** — token refreshed automatically when expired, no manual intervention
+- **OpenAI-compatible** `POST /v1/chat/completions` (streaming + non-streaming) and `GET /v1/models`
+- **Persistent ACP worker pool (`agy-cli`, default)** — keeps `agy acp --stdio` warm with `--disable-telemetry`, `--include-default-customizations=false`, and `--cli_log_file` suppressed
+- **Concurrency & auth protection** — `--max-concurrency` guard + mandatory `--api-key` when binding non-localhost hosts
+- **Legacy `oauth` mode (`--backend oauth`)** — optional direct Cloud Code Assist API + native Gemini passthrough (`POST /v1beta/models/{model}:generateContent`)
 - **Zero pip dependencies** — Python 3.10+ standard library only
 - **systemd service** included — run as a background service on Linux
 
@@ -98,20 +96,37 @@ agy
 ```bash
 git clone https://github.com/mrthx89/antigravity-proxy.git
 cd antigravity-proxy
-
-# Start the proxy
-python3 antigravity_proxy.py
-
-# Verify it's running
-curl http://127.0.0.1:8877/health
-# → {"status": "ok", "service": "antigravity-proxy"}
 ```
 
-That's it. The proxy is now listening on `http://127.0.0.1:8877`.
+**Recommended (local & conservative concurrency for personal Google AI Pro usage):**
+
+```bash
+# Windows (PowerShell) or Linux/macOS (use python3 on Linux/macOS)
+python antigravity_proxy.py --host 127.0.0.1 --port 8877 --max-concurrency 1 --api-key "YOUR_LONG_SECRET"
+```
+
+**Expose on LAN (other devices on your network) or behind a reverse proxy/tunnel:**
+
+```bash
+python antigravity_proxy.py --host 0.0.0.0 --port 8877 --max-concurrency 1 --api-key "YOUR_LONG_SECRET"
+```
+
+> **Public internet access:** Keep `--host 127.0.0.1` with `--api-key` and expose it through an HTTPS tunnel such as `cloudflared tunnel --url http://127.0.0.1:8877` or Tailscale so your API key is encrypted with TLS.
+
+**Verify it is running:**
+
+```bash
+# Health check (public)
+curl http://127.0.0.1:8877/health
+# → {"status": "ok", "service": "antigravity-proxy"}
+
+# List models (authenticated when --api-key is set)
+curl http://127.0.0.1:8877/v1/models -H "Authorization: Bearer YOUR_LONG_SECRET"
+```
 
 ### Connect Your Tool
 
-Any OpenAI-compatible client works. Set base URL to `http://127.0.0.1:8877/v1` and use any model from the table above. The API key can be any string (the proxy doesn't check it).
+Any OpenAI-compatible client works. Set base URL to `http://127.0.0.1:8877/v1` (or your LAN/tunnel URL) and set `api_key` to the value passed to `--api-key` (or any string if running localhost-only without `--api-key`).
 
 <details>
 <summary><b>OpenAI Python SDK</b></summary>
@@ -121,7 +136,7 @@ from openai import OpenAI
 
 client = OpenAI(
     base_url="http://127.0.0.1:8877/v1",
-    api_key="antigravity",
+    api_key="YOUR_LONG_SECRET",
 )
 
 response = client.chat.completions.create(
@@ -137,6 +152,7 @@ print(response.choices[0].message.content)
 
 ```bash
 curl http://127.0.0.1:8877/v1/chat/completions \
+  -H "Authorization: Bearer YOUR_LONG_SECRET" \
   -H "Content-Type: application/json" \
   -d '{
     "model": "gemini-3.8-flash-high",
@@ -371,6 +387,24 @@ agy && systemctl --user restart antigravity-proxy
 
 ## How It Works
 
+### Default Mode (`--backend agy-cli`)
+
+```
+Your Client (OpenAI format)
+    │
+    ▼
+Antigravity Proxy (localhost:8877)
+    │  ┌─ Verifies Bearer / x-api-key (when --api-key is set)
+    │  ├─ Queues via --max-concurrency to avoid request bursts
+    │  ├─ Reuses warm `agy acp --stdio` workers (JSON-RPC)
+    │  └─ Maps OpenAI messages ↔ ACP session/prompt & SSE chunks
+    │
+    ▼
+Official `agy` CLI → Gemini / Claude models → OpenAI format → Your client
+```
+
+### Legacy Mode (`--backend oauth`)
+
 ```
 Your Client (OpenAI format)
     │
@@ -453,7 +487,7 @@ Yes, through the native Gemini passthrough endpoint (`/v1beta/models/{model}:gen
 <details>
 <summary><b>Is there a rate limit?</b></summary>
 
-Rate limits are determined by Google's Antigravity quota, not the proxy. The proxy itself is multithreaded with no concurrency limit.
+Upstream quota is enforced by Google's Antigravity service. Locally, `--backend agy-cli` limits concurrent workers via `--max-concurrency` (default `2`; use `1` for conservative personal usage).
 </details>
 
 <details>

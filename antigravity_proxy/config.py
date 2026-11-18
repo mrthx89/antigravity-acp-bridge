@@ -36,6 +36,14 @@ CLIENT_METADATA = json.dumps(
 DEFAULT_SYSTEM_INSTRUCTION = "You are a helpful AI assistant."
 UPSTREAM_TIMEOUT = 300  # seconds
 TOKEN_REFRESH_SKEW = 120  # refresh this many seconds before expiry
+
+# Transient upstream conditions worth retrying before failing the client call.
+# daily-cloudcode-pa returns these when a model's capacity is momentarily gone;
+# the same request usually succeeds a few seconds later.
+UPSTREAM_RETRY_STATUSES = frozenset({429, 500, 502, 503, 504})
+UPSTREAM_RETRY_ATTEMPTS = 4
+UPSTREAM_RETRY_BASE_DELAY = 2.0  # seconds; doubles per attempt
+UPSTREAM_RETRY_MAX_DELAY = 30.0  # cap for Retry-After and backoff
 MAX_REQUEST_BODY_BYTES = 20 * 1024 * 1024  # 20 MiB guard against oversized bodies
 
 LOCALHOST_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})

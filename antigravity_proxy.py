@@ -60,15 +60,14 @@ CLIENT_SECRET = os.environ.get(
 
 TOKEN_FILE = os.path.expanduser("~/.gemini/antigravity-cli/antigravity-oauth-token")
 OAUTH_TOKEN_URL = "https://oauth2.googleapis.com/token"
-CLOUDCODE_BASE = "https://cloudcode-pa.googleapis.com"
+CLOUDCODE_BASE = "https://daily-cloudcode-pa.googleapis.com"
 LOAD_CODEASSIST_URL = f"{CLOUDCODE_BASE}/v1internal:loadCodeAssist"
 GENERATE_CONTENT_URL = f"{CLOUDCODE_BASE}/v1internal:generateContent"
 STREAM_GENERATE_CONTENT_URL = f"{CLOUDCODE_BASE}/v1internal:streamGenerateContent?alt=sse"
 
 ANTIGRAVITY_USER_AGENT = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Antigravity/1.0.14 Chrome/138.0.7204.235 Electron/37.3.1 Safari/537.36"
+    "antigravity/cli/1.5.10 "
+    "(aidev_client; os_type=linux; arch=amd64; cl=1023297289; auth_method=consumer)"
 )
 CLIENT_METADATA = json.dumps(
     {"ideType": "ANTIGRAVITY", "platform": "MACOS", "pluginType": "GEMINI"},
@@ -93,9 +92,13 @@ MODEL_MAP = {
     "gemini-3.1-pro-high": ("gemini-3.1-pro-low", "high"),
     "gemini-3-flash": ("gemini-3-flash", None),
     "gemini-3.5-flash": ("gemini-3.5-flash-low", None),
+    # Gemini 3.8 Flash — thinking low/medium/high (matches Antigravity CLI 1.5.10)
+    "gemini-3.8-flash-low": ("gemini-3.8-flash-low", "LOW"),
+    "gemini-3.8-flash-medium": ("gemini-3.8-flash-medium", "MEDIUM"),
+    "gemini-3.8-flash-high": ("gemini-3.8-flash-high", "HIGH"),
     "gemini-2.5-pro": ("gemini-2.5-pro", None),
     "gemini-2.5-flash": ("gemini-2.5-flash", None),
-    "claude-sonnet-4.6": ("claude-sonnet-4-6", None),
+    "claude-sonnet-4.6": ("claude-sonnet-4-6-thinking", None),
     "claude-opus-4.6": ("claude-opus-4-6-thinking", None),
 }
 
@@ -320,10 +323,17 @@ def get_project_id() -> str:
     with _project_lock:
         if _cached_project_id:
             return _cached_project_id
-        token = get_access_token()
-        pid = _load_code_assist(token)
+        override = os.environ.get("ANTIGRAVITY_PROJECT_ID")
+        if override:
+            # Explicit project override (e.g. the CLI's default-cli-project)
+            # takes precedence over the auto-discovered cloudaicompanion project.
+            _log(f"Using project ID override: {override}")
+            pid = override
+        else:
+            token = get_access_token()
+            pid = _load_code_assist(token)
+            _log(f"Discovered project ID: {pid}")
         _cached_project_id = pid
-        _log(f"Discovered project ID: {pid}")
         return pid
 
 
@@ -478,7 +488,7 @@ def _build_passthrough_envelope(model: str, gemini_body: dict) -> dict:
         "request": inner,
         "requestType": "agent",
         "userAgent": "antigravity",
-        "requestId": f"agent-{uuid.uuid4().hex}",
+        "requestId": f"agent/{uuid.uuid4()}/{int(time.time()*1000)}/{uuid.uuid4()}/1",
     }
 
 
@@ -661,8 +671,8 @@ def _build_gemini_request(body: dict, backend_model: str, thinking_level: str = 
         gen_config["stopSequences"] = stops
     if "seed" in body and body["seed"] is not None:
         gen_config["seed"] = int(body["seed"])
-    # Enable thinking for the thinking variant of claude-opus.
-    if backend_model == "claude-opus-4-6-thinking":
+    # Enable thinking for the thinking variant of Claude 4.6 models (sonnet + opus).
+    if backend_model in ("claude-opus-4-6-thinking", "claude-sonnet-4-6-thinking"):
         thinking_cfg = gen_config.get("thinkingConfig", {})
         thinking_cfg.setdefault("includeThoughts", False)
         gen_config["thinkingConfig"] = thinking_cfg
@@ -696,7 +706,7 @@ def _build_gemini_request(body: dict, backend_model: str, thinking_level: str = 
         "request": inner,
         "requestType": "agent",
         "userAgent": "antigravity",
-        "requestId": f"agent-{uuid.uuid4().hex}",
+        "requestId": f"agent/{uuid.uuid4()}/{int(time.time()*1000)}/{uuid.uuid4()}/1",
     }
     return envelope
 

@@ -13,3 +13,6 @@ build/
 *.swp
 *.swo
 *~
+
+# Folder Custom
+[Gg]raphify-out/

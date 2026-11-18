@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "antigravity-proxy"
+version = "2.0.0"
+description = "Zero-dependency local OpenAI-compatible proxy for Google Antigravity's Cloud Code Assist API"
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.10"
+dependencies = []
+
+[project.scripts]
+antigravity-proxy = "antigravity_proxy.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["antigravity_proxy*"]

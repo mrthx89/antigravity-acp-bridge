@@ -225,11 +225,17 @@ The AI will read `AGENTS.md` and guide you through every step: prerequisites che
 ### CLI Arguments
 
 ```
-python3 antigravity_proxy.py [--port PORT] [--host HOST]
+python3 antigravity_proxy.py [--port PORT] [--host HOST] [--api-key KEY] [--cors-origin ORIGINS]
 
-  --port PORT    Port to listen on (default: 8877)
-  --host HOST    Host to bind to (default: 127.0.0.1)
+  --port PORT                  Port to listen on (default: 8877)
+  --host HOST                  Host to bind to (default: 127.0.0.1)
+  --api-key KEY                Require Bearer / x-api-key auth on API routes
+  --allow-unauthenticated      Allow non-localhost binding without --api-key (unsafe)
+  --cors-origin ORIGINS        CORS Allow-Origin header or comma-separated list (default: *)
+  --log-level LEVEL            DEBUG, INFO, WARNING, ERROR (default: INFO)
 ```
+
+> **Module entry point:** You can also run `python3 -m antigravity_proxy` or install with `pip install -e .` and run `antigravity-proxy`.
 
 ### Run as a systemd Service (Linux)
 
@@ -250,11 +256,16 @@ systemctl --user status antigravity-proxy
 
 ### Environment Variables
 
-| Variable                     | Default | Description                        |
-|------------------------------|---------|------------------------------------|
-| `ANTIGRAVITY_CLIENT_ID`      | built-in| Override OAuth client ID           |
-| `ANTIGRAVITY_CLIENT_SECRET`  | built-in| Override OAuth client secret       |
-| `ANTIGRAVITY_PROJECT_ID`     | auto    | Override project ID (auto-discovered) |
+| Variable                     | Default  | Description                                  |
+|------------------------------|----------|----------------------------------------------|
+| `ANTIGRAVITY_PROXY_HOST`     | `127.0.0.1` | Default bind host                         |
+| `ANTIGRAVITY_PROXY_PORT`     | `8877`   | Default bind port                            |
+| `ANTIGRAVITY_PROXY_API_KEY`  | unset    | API key required via Bearer or `x-api-key`   |
+| `ANTIGRAVITY_CORS_ORIGINS`   | `*`      | Allowed CORS origins (`none` to disable)     |
+| `ANTIGRAVITY_TOKEN_FILE`     | `~/.gemini/antigravity-cli/antigravity-oauth-token` | Override OAuth token file path |
+| `ANTIGRAVITY_CLIENT_ID`      | built-in | Override OAuth client ID                     |
+| `ANTIGRAVITY_CLIENT_SECRET`  | built-in | Override OAuth client secret                 |
+| `ANTIGRAVITY_PROJECT_ID`     | auto     | Override project ID (auto-discovered)        |
 
 The default client credentials are the same values embedded in every Antigravity CLI binary — you only need these env vars if you're using a custom build.
 
@@ -387,7 +398,7 @@ Gemini / Claude models → Response unwrapped → OpenAI format → Your client
 
 ## Adding or Updating Models
 
-Edit `MODEL_MAP` at the top of `antigravity_proxy.py`:
+Edit `MODEL_MAP` in `antigravity_proxy/config.py`:
 
 ```python
 MODEL_MAP = {
@@ -446,7 +457,7 @@ The OAuth access token expires (~1 hour). The proxy auto-refreshes it. The refre
 <details>
 <summary><b>Can I bind to 0.0.0.0?</b></summary>
 
-Yes, but **the proxy has no authentication layer**. Anyone who can reach it can use your Antigravity quota. Only bind to a non-localhost address if you understand the risk.
+Yes. When binding to a non-localhost address such as `0.0.0.0`, the proxy requires `--api-key` (or `ANTIGRAVITY_PROXY_API_KEY`) by default so unauthorized callers cannot use your Antigravity quota. Pass `--allow-unauthenticated` only on a trusted private network.
 </details>
 
 ---

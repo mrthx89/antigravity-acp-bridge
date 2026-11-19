@@ -491,6 +491,7 @@ class AgyAcpWorker:
                     f"agy ACP worker exited unexpectedly (code={code}){suffix}",
                     status=502,
                 )
+            deadline = time.monotonic() + max(1.0, timeout)
             stripped = line.strip()
             if not stripped:
                 continue

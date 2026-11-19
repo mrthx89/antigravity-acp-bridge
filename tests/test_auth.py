@@ -10,7 +10,7 @@ from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock, patch
 
 from antigravity_acp_bridge.auth import ProjectResolver, TokenManager, deep_find, parse_expiry
-from antigravity_acp_bridge.config import ProxyConfig
+from antigravity_acp_bridge.config import BridgeConfig
 
 
 class AuthHelpersTests(unittest.TestCase):
@@ -48,7 +48,7 @@ class TokenManagerTests(unittest.TestCase):
                     fh,
                 )
 
-            cfg = ProxyConfig(token_file=token_path)
+            cfg = BridgeConfig(token_file=token_path)
             mgr = TokenManager(cfg)
             self.assertTrue(mgr.preflight_check())
             self.assertEqual(mgr.get_access_token(), "valid-access")
@@ -79,7 +79,7 @@ class TokenManagerTests(unittest.TestCase):
             }).encode("utf-8")
             mock_resp.__enter__.return_value = mock_resp
 
-            cfg = ProxyConfig(token_file=token_path)
+            cfg = BridgeConfig(token_file=token_path)
             mgr = TokenManager(cfg)
             with patch("antigravity_acp_bridge.auth.urlopen", return_value=mock_resp):
                 token = mgr.get_access_token()
@@ -92,14 +92,14 @@ class TokenManagerTests(unittest.TestCase):
 
 class ProjectResolverTests(unittest.TestCase):
     def test_override_bypasses_network_and_caches(self) -> None:
-        cfg = ProxyConfig(project_id_override="custom-proj")
+        cfg = BridgeConfig(project_id_override="custom-proj")
         mgr = MagicMock()
         resolver = ProjectResolver(cfg, mgr)
         self.assertEqual(resolver.get_project_id(), "custom-proj")
         mgr.get_access_token.assert_not_called()
 
     def test_discovers_and_caches_project_id(self) -> None:
-        cfg = ProxyConfig()
+        cfg = BridgeConfig()
         mgr = MagicMock()
         mgr.get_access_token.return_value = "tok"
         mock_resp = MagicMock()

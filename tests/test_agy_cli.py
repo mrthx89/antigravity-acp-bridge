@@ -21,8 +21,8 @@ from antigravity_acp_bridge.agy_cli import (
     parse_agy_usage,
     parse_openai_tool_calls,
 )
-from antigravity_acp_bridge.config import ProxyConfig
-from antigravity_acp_bridge.server import ProxyHTTPServer
+from antigravity_acp_bridge.config import BridgeConfig
+from antigravity_acp_bridge.server import BridgeHTTPServer
 
 
 class _FakeAcpProcess:
@@ -192,7 +192,7 @@ class AgyCliBackendTests(unittest.TestCase):
         )
 
     def test_resolve_bin_falls_back_to_standard_location(self) -> None:
-        cfg = ProxyConfig(backend="agy-cli", agy_bin="agy")
+        cfg = BridgeConfig(backend="agy-cli", agy_bin="agy")
         client = AgyCliClient(cfg)
         with tempfile.TemporaryDirectory() as tmpdir:
             if os.name == "nt":
@@ -217,7 +217,7 @@ class AgyCliBackendTests(unittest.TestCase):
 
     def test_acp_worker_reuses_process_rejects_permissions_and_closes_session(self) -> None:
         fake_proc = _FakeAcpProcess()
-        cfg = ProxyConfig(backend="agy-cli", max_concurrency=1)
+        cfg = BridgeConfig(backend="agy-cli", max_concurrency=1)
         client = AgyCliClient(cfg)
 
         with patch("antigravity_acp_bridge.agy_cli.shutil.which", return_value="agy"), patch(
@@ -297,7 +297,7 @@ class AgyCliBackendTests(unittest.TestCase):
         self.assertEqual(json.loads(tcs2[0]["function"]["arguments"]), {"command": "df -h"})
 
     def test_stream_with_tool_parsing_handles_prose_prefix_and_malformed_json(self) -> None:
-        client = AgyCliClient(ProxyConfig(backend="agy-cli", worker_idle_timeout=0))
+        client = AgyCliClient(BridgeConfig(backend="agy-cli", worker_idle_timeout=0))
         try:
             # Prose before <openai_tool_calls> split across chunk boundaries
             raw_chunks = iter([
@@ -349,7 +349,7 @@ class AgyCliBackendTests(unittest.TestCase):
             spawned_cmds.append(list(cmd))
             return _FlagRejectProc() if len(spawned_cmds) == 1 else good_proc
 
-        worker = AgyAcpWorker("agy", ProxyConfig(backend="agy-cli"))
+        worker = AgyAcpWorker("agy", BridgeConfig(backend="agy-cli"))
         try:
             with patch("antigravity_acp_bridge.agy_cli.subprocess.Popen", side_effect=_fake_popen):
                 worker.ensure_started()
@@ -361,7 +361,7 @@ class AgyCliBackendTests(unittest.TestCase):
     def test_acp_worker_timeout_raises_504(self) -> None:
         import queue as _q
 
-        worker = AgyAcpWorker("agy", ProxyConfig(backend="agy-cli", upstream_timeout=1))
+        worker = AgyAcpWorker("agy", BridgeConfig(backend="agy-cli", upstream_timeout=1))
         worker._use_stdout_reader = True
         worker._stdout_queue = _q.Queue()
         worker._stderr_lines.append("waiting for keyring")
@@ -374,8 +374,8 @@ class AgyCliBackendTests(unittest.TestCase):
         agy_client = MagicMock()
         agy_client.stream_chat.side_effect = AgyCliError("agy not logged in", status=502)
 
-        cfg = ProxyConfig(backend="agy-cli", api_key="k")
-        server = ProxyHTTPServer(("127.0.0.1", 0), cfg, agy_client=agy_client)
+        cfg = BridgeConfig(backend="agy-cli", api_key="k")
+        server = BridgeHTTPServer(("127.0.0.1", 0), cfg, agy_client=agy_client)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         port = server.server_address[1]
@@ -432,7 +432,7 @@ class AgyCliBackendTests(unittest.TestCase):
                     super().handle_request(obj)
 
         fake_proc = _RecoveryProc()
-        client = AgyCliClient(ProxyConfig(backend="agy-cli", max_concurrency=1))
+        client = AgyCliClient(BridgeConfig(backend="agy-cli", max_concurrency=1))
         with patch("antigravity_acp_bridge.agy_cli.shutil.which", return_value="agy"), patch(
             "antigravity_acp_bridge.agy_cli.subprocess.Popen", return_value=fake_proc
         ):
@@ -460,8 +460,8 @@ class AgyCliBackendTests(unittest.TestCase):
             {"finish_reason": "stop", "usage": {"prompt_tokens": 10, "completion_tokens": 2, "total_tokens": 12}},
         ])
 
-        cfg = ProxyConfig(backend="agy-cli", api_key="cli-secret")
-        server = ProxyHTTPServer(("127.0.0.1", 0), cfg, agy_client=agy_client)
+        cfg = BridgeConfig(backend="agy-cli", api_key="cli-secret")
+        server = BridgeHTTPServer(("127.0.0.1", 0), cfg, agy_client=agy_client)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         port = server.server_address[1]
@@ -535,7 +535,7 @@ class PoolLimitSemanticsTest(unittest.TestCase):
 
     @staticmethod
     def _client(limit: int) -> AgyCliClient:
-        return AgyCliClient(ProxyConfig(backend="agy-cli", max_concurrency=limit))
+        return AgyCliClient(BridgeConfig(backend="agy-cli", max_concurrency=limit))
 
     def test_positive_limit_sets_pool_cap(self) -> None:
         client = self._client(3)
@@ -598,7 +598,7 @@ class IdleReaperTests(unittest.TestCase):
     @staticmethod
     def _client(timeout: float, limit: int = 0) -> AgyCliClient:
         return AgyCliClient(
-            ProxyConfig(backend="agy-cli", max_concurrency=limit, worker_idle_timeout=timeout)
+            BridgeConfig(backend="agy-cli", max_concurrency=limit, worker_idle_timeout=timeout)
         )
 
     def test_reaper_disabled_when_timeout_is_zero(self) -> None:

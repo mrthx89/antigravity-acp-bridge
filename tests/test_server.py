@@ -1,4 +1,4 @@
-"""Integration tests for ProxyHTTPServer, auth, CORS, and routes."""
+"""Integration tests for BridgeHTTPServer, auth, CORS, and routes."""
 
 from __future__ import annotations
 
@@ -10,19 +10,19 @@ from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 from antigravity_acp_bridge.cli import main as cli_main
-from antigravity_acp_bridge.config import ProxyConfig
-from antigravity_acp_bridge.server import ProxyHTTPServer
+from antigravity_acp_bridge.config import BridgeConfig
+from antigravity_acp_bridge.server import BridgeHTTPServer
 from antigravity_acp_bridge.upstream import UpstreamError
 
 
 class ServerIntegrationTests(unittest.TestCase):
-    def _start_server(self, config: ProxyConfig, upstream: MagicMock | None = None):
+    def _start_server(self, config: BridgeConfig, upstream: MagicMock | None = None):
         token_mgr = MagicMock()
         resolver = MagicMock()
         resolver.get_project_id.return_value = "test-project"
         if upstream is None:
             upstream = MagicMock()
-        server = ProxyHTTPServer(("127.0.0.1", 0), config, token_mgr, resolver, upstream)
+        server = BridgeHTTPServer(("127.0.0.1", 0), config, token_mgr, resolver, upstream)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         return server, thread
@@ -49,7 +49,7 @@ class ServerIntegrationTests(unittest.TestCase):
         }
         upstream.stream_generate_content.side_effect = UpstreamError("bad stream", status=400)
 
-        cfg = ProxyConfig(backend="oauth", api_key="secret-123", cors_origins="https://ui.example.com")
+        cfg = BridgeConfig(backend="oauth", api_key="secret-123", cors_origins="https://ui.example.com")
         server, thread = self._start_server(cfg, upstream)
         port = server.server_address[1]
         try:
@@ -125,7 +125,7 @@ class ServerIntegrationTests(unittest.TestCase):
         upstream.call_generate_content.return_value = {
             "candidates": [{"content": {"parts": [{"text": "chunked ok"}]}, "finishReason": "STOP"}],
         }
-        cfg = ProxyConfig(backend="oauth")
+        cfg = BridgeConfig(backend="oauth")
         server, thread = self._start_server(cfg, upstream)
         port = server.server_address[1]
         try:

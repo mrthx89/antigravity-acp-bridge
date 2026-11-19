@@ -1,4 +1,4 @@
-"""HTTP server and OpenAI/Gemini request handler for Antigravity Proxy."""
+"""HTTP server and OpenAI/Gemini request handler for Antigravity ACP Bridge."""
 
 from __future__ import annotations
 
@@ -16,6 +16,7 @@ from urllib.parse import urlparse
 from .agy_cli import AgyCliClient, AgyCliError, format_messages_for_agy
 from .auth import ProjectResolver, TokenManager
 from .config import (
+    BridgeConfig,
     DEFAULT_MODEL,
     MAX_REQUEST_BODY_BYTES,
     MODEL_MAP,
@@ -50,7 +51,7 @@ class BridgeHTTPServer(ThreadingHTTPServer):
     def __init__(
         self,
         server_address: tuple[str, int],
-        config: ProxyConfig,
+        config: BridgeConfig,
         token_manager: TokenManager | None = None,
         project_resolver: ProjectResolver | None = None,
         upstream_client: UpstreamClient | None = None,
@@ -78,12 +79,8 @@ class BridgeHandler(BaseHTTPRequestHandler):
     def _bridge(self) -> BridgeHTTPServer:
         return self.server  # type: ignore[return-value]
 
-    @property
-    def _proxy(self) -> BridgeHTTPServer:
-        return self._bridge
-
     def _resolve_cors_origin(self) -> str | None:
-        configured = (self._proxy.config.cors_origins or "").strip()
+        configured = (self._bridge.config.cors_origins or "").strip()
         if not configured or configured.lower() == "none":
             return None
         if configured == "*":
@@ -145,7 +142,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
             pass
 
     def _check_auth(self, path: str) -> bool:
-        expected = self._proxy.config.api_key
+        expected = self._bridge.config.api_key
         if not expected or path in _PUBLIC_HEALTH_PATHS:
             return True
 
@@ -350,8 +347,8 @@ class BridgeHandler(BaseHTTPRequestHandler):
 
     def _handle_models(self) -> None:
         now = int(time.time())
-        if self._proxy.config.backend == "agy-cli" and self._proxy.agy_client is not None:
-            model_ids = self._proxy.agy_client.list_models()
+        if self._bridge.config.backend == "agy-cli" and self._bridge.agy_client is not None:
+            model_ids = self._bridge.agy_client.list_models()
         else:
             model_ids = list(MODEL_MAP.keys())
         models = [
@@ -361,7 +358,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
         self._send_json(200, {"object": "list", "data": models})
 
     def _handle_gemini_passthrough(self, path: str) -> None:
-        if self._proxy.config.backend == "agy-cli":
+        if self._bridge.config.backend == "agy-cli":
             self._send_error_json(
                 "not_implemented",
                 "Native Gemini passthrough requires --backend oauth",
@@ -378,7 +375,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
         model = match.group(1) if match else DEFAULT_MODEL
 
         try:
-            project_id = self._proxy.project_resolver.get_project_id()
+            project_id = self._bridge.project_resolver.get_project_id()
             envelope = build_passthrough_envelope(model, body, project_id)
         except UpstreamError as exc:
             self._send_error_json("upstream_error", str(exc), http_code=exc.status)
@@ -401,7 +398,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
             return
 
         try:
-            gemini_resp = self._proxy.upstream_client.call_generate_content(envelope)
+            gemini_resp = self._bridge.upstream_client.call_generate_content(envelope)
         except UpstreamError as exc:
             self._send_error_json("upstream_error", str(exc), http_code=exc.status)
             return
@@ -426,8 +423,8 @@ class BridgeHandler(BaseHTTPRequestHandler):
             openai_model, (openai_model, None)
         )
 
-        if self._proxy.config.backend == "agy-cli":
-            if self._proxy.agy_client is None:
+        if self._bridge.config.backend == "agy-cli":
+            if self._bridge.agy_client is None:
                 self._send_error_json("internal_error", "agy-cli backend is not initialized", http_code=500)
                 return
             if not format_messages_for_agy(body.get("messages") or []):
@@ -445,7 +442,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
             return
 
         try:
-            project_id = self._proxy.project_resolver.get_project_id()
+            project_id = self._bridge.project_resolver.get_project_id()
             envelope = build_gemini_request(
                 body,
                 backend_model,
@@ -488,7 +485,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
 
     def _handle_nonstream(self, envelope: dict, openai_model: str) -> None:
         try:
-            gemini_resp = self._proxy.upstream_client.call_generate_content(envelope)
+            gemini_resp = self._bridge.upstream_client.call_generate_content(envelope)
         except UpstreamError as exc:
             self._send_error_json("upstream_error", str(exc), http_code=exc.status)
             return
@@ -580,7 +577,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
     ) -> bool:
         """Fall back to non-streaming call when streamGenerateContent rejects HTTP 400."""
         try:
-            resp = self._proxy.upstream_client.call_generate_content(envelope)
+            resp = self._bridge.upstream_client.call_generate_content(envelope)
             openai_resp = gemini_response_to_openai(resp, openai_model)
         except Exception:
             return False
@@ -633,9 +630,9 @@ class BridgeHandler(BaseHTTPRequestHandler):
         return (completion_id, created)
 
     def _handle_agy_nonstream(self, body: dict, backend_model: str) -> None:
-        assert self._proxy.agy_client is not None
+        assert self._bridge.agy_client is not None
         try:
-            openai_resp = self._proxy.agy_client.call_chat(body, backend_model)
+            openai_resp = self._bridge.agy_client.call_chat(body, backend_model)
         except AgyCliError as exc:
             err_type = "invalid_request_error" if exc.status == 400 else "api_error"
             self._send_error_json("agy_cli_error", str(exc), err_type=err_type, http_code=exc.status)
@@ -651,11 +648,11 @@ class BridgeHandler(BaseHTTPRequestHandler):
         backend_model: str,
         openai_model: str,
     ) -> None:
-        assert self._proxy.agy_client is not None
+        assert self._bridge.agy_client is not None
         # Pull the first event BEFORE sending HTTP 200 SSE headers so startup/auth/model
         # failures return proper HTTP 4xx/5xx JSON errors instead of 200 OK text.
         try:
-            gen = self._proxy.agy_client.stream_chat(body, backend_model)
+            gen = self._bridge.agy_client.stream_chat(body, backend_model)
             first_item = next(gen, None)
         except AgyCliError as exc:
             err_type = "invalid_request_error" if exc.status == 400 else "api_error"
@@ -746,7 +743,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
         completion_id, created = started
 
         try:
-            gen = self._proxy.upstream_client.stream_generate_content(envelope)
+            gen = self._bridge.upstream_client.stream_generate_content(envelope)
             self._consume_stream_events(gen, completion_id, created, openai_model)
         except UpstreamError as exc:
             if exc.status == 400 and self._fallback_to_nonstream_chunk(

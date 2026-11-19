@@ -1,1 +1,1 @@
-"""Test suite for Antigravity Proxy."""
+"""Test suite for Antigravity ACP Bridge."""

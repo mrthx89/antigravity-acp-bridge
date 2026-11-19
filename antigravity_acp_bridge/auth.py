@@ -12,9 +12,15 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from ._http import build_antigravity_request, read_http_error_detail
-from .config import LOAD_CODEASSIST_URL, OAUTH_TOKEN_URL, TOKEN_REFRESH_SKEW, ProxyConfig
+from .config import (
+    LOAD_CODEASSIST_URL,
+    OAUTH_TOKEN_URL,
+    TOKEN_REFRESH_SKEW,
+    BridgeConfig,
+    ProxyConfig,
+)
 
-logger = logging.getLogger("antigravity_proxy.auth")
+logger = logging.getLogger("antigravity_acp_bridge.auth")
 
 
 def parse_expiry(expiry_raw) -> float:
@@ -69,7 +75,7 @@ def deep_find(obj, key: str):
 class TokenManager:
     """Thread-safe reader, refresher, and disk persister for Antigravity OAuth tokens."""
 
-    def __init__(self, config: ProxyConfig) -> None:
+    def __init__(self, config: BridgeConfig) -> None:
         self._config = config
         self._lock = threading.Lock()
 
@@ -182,7 +188,7 @@ class TokenManager:
 class ProjectResolver:
     """Thread-safe, cached Cloud Code Assist project ID resolver."""
 
-    def __init__(self, config: ProxyConfig, token_manager: TokenManager) -> None:
+    def __init__(self, config: BridgeConfig, token_manager: TokenManager) -> None:
         self._config = config
         self._token_manager = token_manager
         self._lock = threading.Lock()

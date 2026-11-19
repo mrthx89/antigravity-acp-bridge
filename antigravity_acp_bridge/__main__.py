@@ -1,4 +1,4 @@
-"""Allow running the proxy via ``python -m antigravity_proxy``."""
+"""Allow running the bridge via ``python -m antigravity_acp_bridge``."""
 
 import sys
 

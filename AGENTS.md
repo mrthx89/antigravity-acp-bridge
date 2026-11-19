@@ -33,15 +33,15 @@ Then authenticate: run `agy` once, sign in with Google account.
 ### Step 2 — Clone and Start
 
 ```bash
-git clone https://github.com/usamashehab/antigravity-proxy.git
-cd antigravity-proxy
-python3 antigravity_proxy.py
+git clone https://github.com/usamashehab/antigravity-acp-bridge.git
+cd antigravity-acp-bridge
+python3 antigravity_acp_bridge.py
 ```
 
 Verify it's running:
 ```bash
 curl http://127.0.0.1:8877/health
-# Should return: {"status": "ok", "service": "antigravity-proxy"}
+# Should return: {"status": "ok", "service": "antigravity-acp-bridge"}
 ```
 
 ### Step 3 — Configure Their Tool
@@ -95,16 +95,16 @@ agy  # re-authenticate
 ```
 
 ### 401 / auth errors after working for a while
-The OAuth refresh token has expired. Re-run `agy` and restart the proxy.
+The OAuth refresh token has expired. Re-run `agy` and restart the bridge.
 
 ### Model returns empty response or 404
 The model name doesn't exist on the Antigravity backend. Use a name from the model table above. When in doubt, `gemini-3-flash` or `gemini-3.5-flash` are the most reliable.
 
-### Proxy is slow on first request
+### Bridge is slow on first request
 The first request discovers the project ID (extra network call). Subsequent requests are faster.
 
 ### Requests timeout
-The Antigravity backend can be slow, especially for thinking models. This is not a proxy issue — it's upstream latency.
+The Antigravity backend can be slow, especially for thinking models. This is not a bridge issue — it's upstream latency.
 
 ---
 
@@ -112,14 +112,14 @@ The Antigravity backend can be slow, especially for thinking models. This is not
 
 ```
 Client (OpenAI format)
-  → Proxy translates to Gemini format
+  → Bridge translates to Gemini format
   → Wraps in Antigravity envelope
   → Forwards to cloudcode-pa.googleapis.com
   → Response unwrapped, converted to OpenAI format
   → Returned to client
 ```
 
-The proxy auto-refreshes the OAuth token when it expires. It uses Python stdlib only — no dependencies to install.
+The bridge auto-refreshes the OAuth token when it expires. It uses Python stdlib only — no dependencies to install.
 
 ---
 
@@ -127,8 +127,8 @@ The proxy auto-refreshes the OAuth token when it expires. It uses Python stdlib 
 
 | File                        | Purpose                                          |
 |-----------------------------|--------------------------------------------------|
-| `antigravity_proxy.py`      | Main proxy server (single file, stdlib only)     |
-| `antigravity-proxy.service` | systemd user service template                    |
+| `antigravity_acp_bridge.py` | Main bridge server (single file, stdlib only)    |
+| `antigravity-acp-bridge.service` | systemd user service template               |
 | `README.md`                 | Full human-readable documentation                |
 | `AGENTS.md`                 | This file — instructions for AI assistants       |
 
@@ -136,7 +136,7 @@ The proxy auto-refreshes the OAuth token when it expires. It uses Python stdlib 
 
 ## Security Notes
 
-- The proxy binds to `127.0.0.1` by default — only accessible locally
+- The bridge binds to `127.0.0.1` by default — only accessible locally
 - No API key or authentication layer (relies on localhost binding)
 - OAuth token stays on the user's machine, never sent anywhere except Google
 - The `CLIENT_ID` and `CLIENT_SECRET` constants are the same values embedded in every Antigravity CLI binary — they are not personal secrets

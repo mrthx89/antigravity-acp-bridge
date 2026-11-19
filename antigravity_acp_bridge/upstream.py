@@ -22,7 +22,7 @@ from .config import (
 )
 from .sse import parse_remaining, try_parse_one_event
 
-logger = logging.getLogger("antigravity_proxy.upstream")
+logger = logging.getLogger("antigravity_acp_bridge.upstream")
 
 
 def _retry_after_seconds(err: HTTPError) -> float:

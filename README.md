@@ -75,7 +75,7 @@ Your Client (OpenAI format)  ──HTTP──>  Antigravity ACP Bridge (:8877)  
 | `claude-opus-5-5-medium` | `claude-opus-5-5-medium` | Medium    | Claude     |
 | `claude-opus-5-5-high` | `claude-opus-5-5-high` | High      | Claude     |
 
-> **Note:** Always use the **friendly name** in your client — the proxy translates it to the backend model id automatically. Whether a model actually **runs** depends on your Antigravity package/access tier; any may return `404` until your account provisions it.
+> **Note:** Always use the **friendly name** in your client — the bridge translates it to the backend model id automatically. Whether a model actually **runs** depends on your Antigravity package/access tier; any may return `404` until your account provisions it.
 
 > **Recommended:** `gemini-3.8-flash-high` — Gemini 3.8 Flash with high reasoning (matches Antigravity CLI 1.5.10).
 
@@ -102,8 +102,8 @@ agy
 ### Install & Run
 
 ```bash
-git clone https://github.com/mrthx89/antigravity-proxy.git
-cd antigravity-proxy
+git clone https://github.com/mrthx89/antigravity-acp-bridge.git
+cd antigravity-acp-bridge
 ```
 
 **Recommended (local & conservative concurrency for personal Google AI Pro usage):**
@@ -113,7 +113,7 @@ cd antigravity-proxy
 python antigravity_acp_bridge.py --host 127.0.0.1 --port 8877 --max-concurrency 1 --api-key "YOUR_LONG_SECRET"
 ```
 
-*(Note: `python antigravity_proxy.py ...` remains supported as a backward-compatible alias).*
+*(Note: `python antigravity_acp_bridge.py ...` remains supported as a backward-compatible alias).*
 
 **Expose on LAN (other devices on your network) or behind a reverse proxy/tunnel:**
 
@@ -214,7 +214,7 @@ hermes config set model.default gemini-3.8-flash-high
 
 ```bash
 export ANTHROPIC_BASE_URL=http://127.0.0.1:8877/v1
-claude  # uses claude-sonnet-4.6 through the proxy
+claude  # uses claude-sonnet-4.6 through the bridge
 ```
 </details>
 
@@ -240,7 +240,7 @@ llm = ChatOpenAI(
 
 This repo includes [`AGENTS.md`](AGENTS.md) — a complete instruction file for AI agents. Just tell your AI assistant:
 
-> "Help me install and configure the antigravity-proxy from https://github.com/mrthx89/antigravity-proxy"
+> "Help me install and configure the antigravity-acp-bridge from https://github.com/mrthx89/antigravity-acp-bridge"
 
 The AI will read `AGENTS.md` and guide you through every step: prerequisites check, installation, tool configuration, and troubleshooting.
 
@@ -251,7 +251,7 @@ The AI will read `AGENTS.md` and guide you through every step: prerequisites che
 ### CLI Arguments
 
 ```
-python3 antigravity_proxy.py [--port PORT] [--host HOST] [--backend {agy-cli,oauth}] [--api-key KEY] [--cors-origin ORIGINS]
+python3 antigravity_acp_bridge.py [--port PORT] [--host HOST] [--backend {agy-cli,oauth}] [--api-key KEY] [--cors-origin ORIGINS]
 
   --port PORT                  Port to listen on (default: 8877)
   --host HOST                  Host to bind to (default: 127.0.0.1)
@@ -266,36 +266,36 @@ python3 antigravity_proxy.py [--port PORT] [--host HOST] [--backend {agy-cli,oau
   --log-level LEVEL            DEBUG, INFO, WARNING, ERROR (default: INFO)
 ```
 
-> **Module entry point:** You can also run `python3 -m antigravity_proxy` or install with `pip install -e .` and run `antigravity-proxy`.
+> **Module entry point:** You can also run `python3 -m antigravity_acp_bridge` or install with `pip install -e .` and run `antigravity-acp-bridge`.
 
 ### Run as a systemd Service (Linux)
 
 ```bash
 # Clone to permanent location
-git clone https://github.com/mrthx89/antigravity-proxy.git ~/antigravity-proxy
+git clone https://github.com/mrthx89/antigravity-acp-bridge.git ~/antigravity-acp-bridge
 
 # Install service
 mkdir -p ~/.config/systemd/user
-cp ~/antigravity-proxy/antigravity-proxy.service ~/.config/systemd/user/
+cp ~/antigravity-acp-bridge/antigravity-acp-bridge.service ~/.config/systemd/user/
 systemctl --user daemon-reload
-systemctl --user enable antigravity-proxy
-systemctl --user start antigravity-proxy
+systemctl --user enable antigravity-acp-bridge
+systemctl --user start antigravity-acp-bridge
 
 # Check status
-systemctl --user status antigravity-proxy
+systemctl --user status antigravity-acp-bridge
 ```
 
 ### Environment Variables
 
 | Variable                     | Default  | Description                                  |
 |------------------------------|----------|----------------------------------------------|
-| `ANTIGRAVITY_PROXY_HOST`     | `127.0.0.1` | Default bind host                         |
-| `ANTIGRAVITY_PROXY_PORT`     | `8877`   | Default bind port                            |
+| `ANTIGRAVITY_BRIDGE_HOST`     | `127.0.0.1` | Default bind host                         |
+| `ANTIGRAVITY_BRIDGE_PORT`     | `8877`   | Default bind port                            |
 | `ANTIGRAVITY_BACKEND`        | `agy-cli`| Backend mode: `agy-cli` (official) or `oauth`|
 | `ANTIGRAVITY_AGY_BIN`        | `agy`    | `agy` executable for `agy-cli` backend       |
 | `ANTIGRAVITY_AGY_CWD`        | temp dir | Working directory for `agy-cli` calls        |
 | `ANTIGRAVITY_MAX_CONCURRENCY`| `2`      | Max concurrent `agy-cli` workers (`0`=unlim) |
-| `ANTIGRAVITY_PROXY_API_KEY`  | unset    | API key required via Bearer or `x-api-key`   |
+| `ANTIGRAVITY_BRIDGE_API_KEY`  | unset    | API key required via Bearer or `x-api-key`   |
 | `ANTIGRAVITY_CORS_ORIGINS`   | `*`      | Allowed CORS origins (`none` to disable)     |
 | `ANTIGRAVITY_TOKEN_FILE`     | `~/.gemini/antigravity-cli/antigravity-oauth-token` | Override OAuth token file path |
 | `ANTIGRAVITY_CLIENT_ID`      | built-in | Override OAuth client ID                     |
@@ -384,14 +384,14 @@ curl http://127.0.0.1:8877/health
 curl http://127.0.0.1:8877/v1/models
 
 # View logs (systemd)
-journalctl --user -u antigravity-proxy -f
+journalctl --user -u antigravity-acp-bridge -f
 
 # Restart / stop
-systemctl --user restart antigravity-proxy
-systemctl --user stop antigravity-proxy
+systemctl --user restart antigravity-acp-bridge
+systemctl --user stop antigravity-acp-bridge
 
 # Re-authenticate when token expires
-agy && systemctl --user restart antigravity-proxy
+agy && systemctl --user restart antigravity-acp-bridge
 ```
 
 ---
@@ -404,7 +404,7 @@ agy && systemctl --user restart antigravity-proxy
 Your Client (OpenAI format)
     │
     ▼
-Antigravity Proxy (localhost:8877)
+Antigravity ACP Bridge (localhost:8877)
     │  ┌─ Verifies Bearer / x-api-key (when --api-key is set)
     │  ├─ Queues via --max-concurrency to avoid request bursts
     │  ├─ Reuses warm `agy acp --stdio` workers (JSON-RPC)
@@ -420,7 +420,7 @@ Official `agy` CLI → Gemini / Claude models → OpenAI format → Your client
 Your Client (OpenAI format)
     │
     ▼
-Antigravity Proxy (localhost:8877)
+Antigravity ACP Bridge (localhost:8877)
     │  ┌─ Translates OpenAI messages → Gemini contents
     │  ├─ Converts OpenAI tools → Gemini functionDeclarations
     │  ├─ Manages OAuth token (auto-refresh)
@@ -451,7 +451,7 @@ Gemini / Claude models → Response unwrapped → OpenAI format → Your client
 
 ## Adding or Updating Models
 
-Edit `MODEL_MAP` in `antigravity_proxy/config.py`:
+Edit `MODEL_MAP` in `antigravity_acp_bridge/config.py`:
 
 ```python
 MODEL_MAP = {
@@ -463,7 +463,7 @@ MODEL_MAP = {
 }
 ```
 
-Restart the proxy after editing.
+Restart the bridge after editing.
 
 ---
 
@@ -480,7 +480,7 @@ Restart the proxy after editing.
 <details>
 <summary><b>Is this legal to use?</b></summary>
 
-The proxy uses the same OAuth token and API endpoints that the Antigravity CLI itself uses. It does not bypass authentication — you need a valid Google account with Antigravity access. Multiple similar projects exist publicly on GitHub. However, Google's terms of service may restrict programmatic API access. Use at your own discretion.
+The bridge uses the same OAuth token and API endpoints that the Antigravity CLI itself uses. It does not bypass authentication — you need a valid Google account with Antigravity access. Multiple similar projects exist publicly on GitHub. However, Google's terms of service may restrict programmatic API access. Use at your own discretion.
 </details>
 
 <details>
@@ -500,7 +500,7 @@ Yes, through the native Gemini passthrough endpoint (`/v1beta/models/{model}:gen
 
 Upstream quota is enforced by Google's Antigravity service. Locally, `--backend agy-cli` limits concurrent workers via `--max-concurrency` (default `2`; use `1` for conservative personal usage).
 
-Passing `0` (or any negative value) means **unlimited**: no cap is applied, so every concurrent request may hold its own `agy` worker. Budget for it — each warm worker is a full `agy acp --stdio` process at roughly **230 MB RSS**, and workers that finish a request stay pooled at the historical peak concurrency until the proxy restarts. On a 4 GB host, unlimited plus a burst of 5+ parallel requests will push you into swap. Set a positive number unless the machine has headroom.
+Passing `0` (or any negative value) means **unlimited**: no cap is applied, so every concurrent request may hold its own `agy` worker. Budget for it — each warm worker is a full `agy acp --stdio` process at roughly **230 MB RSS**, and workers that finish a request stay pooled at the historical peak concurrency until the bridge restarts. On a 4 GB host, unlimited plus a burst of 5+ parallel requests will push you into swap. Set a positive number unless the machine has headroom.
 
 The idle reaper keeps that bounded: a worker parked longer than `--worker-idle-timeout`
 (default `300` s) is closed and its memory returned, so the pool shrinks back down after a
@@ -514,13 +514,13 @@ workers warm indefinitely.
 <details>
 <summary><b>Does the token expire?</b></summary>
 
-The OAuth access token expires (~1 hour). The proxy auto-refreshes it. The refresh token can expire if unused for extended periods — re-run `agy` if that happens.
+The OAuth access token expires (~1 hour). The bridge auto-refreshes it. The refresh token can expire if unused for extended periods — re-run `agy` if that happens.
 </details>
 
 <details>
 <summary><b>Can I bind to 0.0.0.0?</b></summary>
 
-Yes. When binding to a non-localhost address such as `0.0.0.0`, the proxy requires `--api-key` (or `ANTIGRAVITY_PROXY_API_KEY`) by default so unauthorized callers cannot use your Antigravity quota. Pass `--allow-unauthenticated` only on a trusted private network.
+Yes. When binding to a non-localhost address such as `0.0.0.0`, the bridge requires `--api-key` (or `ANTIGRAVITY_BRIDGE_API_KEY`) by default so unauthorized callers cannot use your Antigravity quota. Pass `--allow-unauthenticated` only on a trusted private network.
 </details>
 
 ---

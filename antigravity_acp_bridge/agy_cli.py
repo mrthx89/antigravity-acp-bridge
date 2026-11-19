@@ -291,7 +291,7 @@ def _is_transient_acp_error(exc: AgyCliError) -> bool:
 class AgyAcpWorker:
     """Persistent ``agy acp --stdio`` JSON-RPC worker to avoid per-request cold starts."""
 
-    def __init__(self, exe: str, config: ProxyConfig) -> None:
+    def __init__(self, exe: str, config: BridgeConfig) -> None:
         self._exe = exe
         self._config = config
         self._proc: subprocess.Popen | None = None
@@ -386,7 +386,7 @@ class AgyAcpWorker:
             {
                 "protocolVersion": 1,
                 "clientCapabilities": {},
-                "clientInfo": {"name": "antigravity-proxy", "version": "2.0.0"},
+                "clientInfo": {"name": "antigravity-acp-bridge", "version": "2.0.0"},
             },
             timeout=min(30.0, float(self._config.upstream_timeout)),
         )
@@ -689,7 +689,7 @@ class AgyAcpWorker:
 
             if not emitted_text:
                 fallback = (
-                    "Unable to execute built-in tools in proxy mode; please rephrase or enable client tools."
+                    "Unable to execute built-in tools in bridge mode; please rephrase or enable client tools."
                     if saw_denied_tool
                     else "Model completed without text output."
                 )
@@ -747,7 +747,7 @@ class AgyAcpWorker:
 class AgyCliClient:
     """Thread-safe pool of warm ``agy acp --stdio`` workers exposing OpenAI chat."""
 
-    def __init__(self, config: ProxyConfig) -> None:
+    def __init__(self, config: BridgeConfig) -> None:
         self._config = config
         self._cached_models: list[str] | None = None
         # 0 or negative means "no cap": every concurrent request may hold its own worker.

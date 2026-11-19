@@ -13,7 +13,6 @@ dependencies = []
 
 [project.scripts]
 antigravity-acp-bridge = "antigravity_acp_bridge.cli:main"
-antigravity-proxy = "antigravity_acp_bridge.cli:main"
 
 [tool.setuptools.packages.find]
-include = ["antigravity_acp_bridge*", "antigravity_proxy*"]
+include = ["antigravity_acp_bridge*"]

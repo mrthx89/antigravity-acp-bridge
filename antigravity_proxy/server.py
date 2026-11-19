@@ -157,41 +157,86 @@ class ProxyHandler(BaseHTTPRequestHandler):
         )
         return False
 
+    def _read_chunked_body(self) -> bytes | None:
+        chunks: list[bytes] = []
+        total = 0
+        while True:
+            size_line = self.rfile.readline(64 * 1024)
+            if not size_line:
+                break
+            size_str = size_line.split(b";", 1)[0].strip()
+            try:
+                chunk_size = int(size_str, 16)
+            except ValueError:
+                self._send_error_json(
+                    "invalid_request",
+                    "Invalid chunked transfer encoding",
+                    err_type="invalid_request_error",
+                    http_code=400,
+                )
+                return None
+            if chunk_size == 0:
+                # Consume trailing headers/CRLF after final 0-length chunk.
+                while True:
+                    trailer = self.rfile.readline(64 * 1024)
+                    if not trailer or trailer in (b"\r\n", b"\n"):
+                        break
+                break
+            total += chunk_size
+            if total > MAX_REQUEST_BODY_BYTES:
+                self._send_error_json(
+                    "payload_too_large",
+                    f"Request body exceeds {MAX_REQUEST_BODY_BYTES} bytes",
+                    err_type="invalid_request_error",
+                    http_code=413,
+                )
+                return None
+            data = self.rfile.read(chunk_size)
+            chunks.append(data)
+            self.rfile.readline(4)  # trailing CRLF
+        return b"".join(chunks)
+
     def _read_body(self) -> dict | None:
-        raw_len = self.headers.get("Content-Length")
-        if not raw_len:
-            return {}
-        try:
-            length = int(raw_len)
-        except ValueError:
-            self._send_error_json(
-                "invalid_request",
-                "Invalid Content-Length header",
-                err_type="invalid_request_error",
-                http_code=400,
-            )
-            return None
+        transfer_encoding = (self.headers.get("Transfer-Encoding") or "").lower()
+        if "chunked" in transfer_encoding:
+            raw = self._read_chunked_body()
+            if raw is None:
+                return None
+        else:
+            raw_len = self.headers.get("Content-Length")
+            if not raw_len:
+                return {}
+            try:
+                length = int(raw_len)
+            except ValueError:
+                self._send_error_json(
+                    "invalid_request",
+                    "Invalid Content-Length header",
+                    err_type="invalid_request_error",
+                    http_code=400,
+                )
+                return None
 
-        if length < 0:
-            self._send_error_json(
-                "invalid_request",
-                "Negative Content-Length header",
-                err_type="invalid_request_error",
-                http_code=400,
-            )
-            return None
-        if length > MAX_REQUEST_BODY_BYTES:
-            self._send_error_json(
-                "payload_too_large",
-                f"Request body exceeds {MAX_REQUEST_BODY_BYTES} bytes",
-                err_type="invalid_request_error",
-                http_code=413,
-            )
-            return None
-        if length == 0:
-            return {}
+            if length < 0:
+                self._send_error_json(
+                    "invalid_request",
+                    "Negative Content-Length header",
+                    err_type="invalid_request_error",
+                    http_code=400,
+                )
+                return None
+            if length > MAX_REQUEST_BODY_BYTES:
+                self._send_error_json(
+                    "payload_too_large",
+                    f"Request body exceeds {MAX_REQUEST_BODY_BYTES} bytes",
+                    err_type="invalid_request_error",
+                    http_code=413,
+                )
+                return None
+            if length == 0:
+                return {}
+            raw = self.rfile.read(length)
 
-        raw = self.rfile.read(length)
         if not raw:
             return {}
         try:
@@ -589,38 +634,65 @@ class ProxyHandler(BaseHTTPRequestHandler):
         openai_model: str,
     ) -> None:
         assert self._proxy.agy_client is not None
+        # Pull the first event BEFORE sending HTTP 200 SSE headers so startup/auth/model
+        # failures return proper HTTP 4xx/5xx JSON errors instead of 200 OK text.
+        try:
+            gen = self._proxy.agy_client.stream_chat(body, backend_model)
+            first_item = next(gen, None)
+        except AgyCliError as exc:
+            err_type = "invalid_request_error" if exc.status == 400 else "api_error"
+            self._send_error_json(
+                "agy_cli_error", str(exc), err_type=err_type, http_code=exc.status
+            )
+            return
+        except Exception as exc:
+            self._send_error_json(
+                "agy_cli_error", f"agy CLI stream failed: {exc}", http_code=502
+            )
+            return
+
         started = self._start_sse_stream(openai_model)
         if not started:
+            gen.close()
             return
         completion_id, created = started
 
         finish_reason = "stop"
         usage = None
+
+        def _emit_item(item: dict) -> bool:
+            nonlocal finish_reason, usage
+            if item.get("text"):
+                chunk = self._make_stream_chunk(
+                    completion_id,
+                    created,
+                    openai_model,
+                    {"content": item["text"]},
+                )
+                if not self._send_sse_json(chunk):
+                    return False
+            if item.get("tool_calls"):
+                finish_reason = "tool_calls"
+                chunk = self._make_stream_chunk(
+                    completion_id,
+                    created,
+                    openai_model,
+                    {"tool_calls": item["tool_calls"]},
+                )
+                if not self._send_sse_json(chunk):
+                    return False
+            if "finish_reason" in item and finish_reason != "tool_calls":
+                finish_reason = item["finish_reason"]
+            if "usage" in item:
+                usage = item["usage"]
+            return True
+
         try:
-            for item in self._proxy.agy_client.stream_chat(body, backend_model):
-                if item.get("text"):
-                    chunk = self._make_stream_chunk(
-                        completion_id,
-                        created,
-                        openai_model,
-                        {"content": item["text"]},
-                    )
-                    if not self._send_sse_json(chunk):
-                        return
-                if item.get("tool_calls"):
-                    finish_reason = "tool_calls"
-                    chunk = self._make_stream_chunk(
-                        completion_id,
-                        created,
-                        openai_model,
-                        {"tool_calls": item["tool_calls"]},
-                    )
-                    if not self._send_sse_json(chunk):
-                        return
-                if "finish_reason" in item and finish_reason != "tool_calls":
-                    finish_reason = item["finish_reason"]
-                if "usage" in item:
-                    usage = item["usage"]
+            if first_item is not None and not _emit_item(first_item):
+                return
+            for item in gen:
+                if not _emit_item(item):
+                    return
             final_chunk = self._make_stream_chunk(
                 completion_id,
                 created,
@@ -643,6 +715,11 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 )
             )
             self._send_sse_done()
+        finally:
+            try:
+                gen.close()
+            except Exception:
+                pass
 
     def _handle_stream(self, envelope: dict, openai_model: str) -> None:
         started = self._start_sse_stream(openai_model)

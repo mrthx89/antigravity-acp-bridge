@@ -115,6 +115,39 @@ class ServerIntegrationTests(unittest.TestCase):
             server.server_close()
             thread.join(timeout=2)
 
+    def test_chunked_transfer_encoding_post_body(self) -> None:
+        import http.client
+
+        upstream = MagicMock()
+        upstream.call_generate_content.return_value = {
+            "candidates": [{"content": {"parts": [{"text": "chunked ok"}]}, "finishReason": "STOP"}],
+        }
+        cfg = ProxyConfig(backend="oauth")
+        server, thread = self._start_server(cfg, upstream)
+        port = server.server_address[1]
+        try:
+            payload = json.dumps({
+                "model": "gemini-3.8-flash-high",
+                "messages": [{"role": "user", "content": "hi"}],
+            }).encode("utf-8")
+            chunked = f"{len(payload):x}\r\n".encode("ascii") + payload + b"\r\n0\r\n\r\n"
+            conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+            conn.request(
+                "POST",
+                "/v1/chat/completions",
+                body=chunked,
+                headers={"Content-Type": "application/json", "Transfer-Encoding": "chunked"},
+            )
+            resp = conn.getresponse()
+            raw = resp.read().decode("utf-8")
+            conn.close()
+            self.assertEqual(resp.status, 200)
+            self.assertEqual(json.loads(raw)["choices"][0]["message"]["content"], "chunked ok")
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+
     def test_cli_refuses_non_localhost_without_api_key(self) -> None:
         code = cli_main(["--host", "0.0.0.0"])
         self.assertEqual(code, 2)

@@ -15,6 +15,7 @@ from urllib.request import Request, urlopen
 from antigravity_proxy.agy_cli import (
     AgyAcpWorker,
     AgyCliClient,
+    AgyCliError,
     format_messages_for_agy,
     format_request_for_agy,
     parse_agy_usage,
@@ -286,6 +287,118 @@ class AgyCliBackendTests(unittest.TestCase):
         self.assertEqual(len(tcs), 1)
         self.assertEqual(tcs[0]["function"]["name"], "terminal")
         self.assertEqual(json.loads(tcs[0]["function"]["arguments"]), {"command": "free -h"})
+
+        # Fenced JSON inside <openai_tool_calls> must also parse cleanly.
+        rem2, tcs2 = parse_openai_tool_calls(
+            'Checking now.\n<openai_tool_calls>\n```json\n[{"name": "terminal", "arguments": {"command": "df -h"}}]\n```\n</openai_tool_calls>'
+        )
+        self.assertEqual(rem2, "Checking now.")
+        self.assertEqual(len(tcs2), 1)
+        self.assertEqual(json.loads(tcs2[0]["function"]["arguments"]), {"command": "df -h"})
+
+    def test_stream_with_tool_parsing_handles_prose_prefix_and_malformed_json(self) -> None:
+        client = AgyCliClient(ProxyConfig(backend="agy-cli", worker_idle_timeout=0))
+        try:
+            # Prose before <openai_tool_calls> split across chunk boundaries
+            raw_chunks = iter([
+                {"text": "Let me check. <openai_"},
+                {"text": 'tool_calls>[{"name":"terminal","arguments":{"command":"uptime"}}]</openai_tool_calls>'},
+                {"finish_reason": "stop", "usage": {"prompt_tokens": 5, "completion_tokens": 5, "total_tokens": 10}},
+            ])
+            events = list(client._stream_with_tool_parsing(raw_chunks))
+            texts = [e["text"] for e in events if "text" in e]
+            tcs = [e["tool_calls"] for e in events if "tool_calls" in e]
+            self.assertEqual("".join(texts), "Let me check. ")
+            self.assertEqual(len(tcs), 1)
+            self.assertEqual(tcs[0][0]["function"]["name"], "terminal")
+            self.assertEqual(events[-1]["finish_reason"], "tool_calls")
+
+            # Malformed JSON inside tag must be preserved as text, not dropped
+            bad_chunks = iter([
+                {"text": "<openai_tool_calls>{not valid json}</openai_tool_calls>"},
+                {"finish_reason": "stop", "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}},
+            ])
+            bad_events = list(client._stream_with_tool_parsing(bad_chunks))
+            self.assertEqual(bad_events[0]["text"], "<openai_tool_calls>{not valid json}</openai_tool_calls>")
+            self.assertEqual(bad_events[-1]["finish_reason"], "stop")
+        finally:
+            client.close()
+
+    def test_acp_worker_falls_back_on_unknown_flag_and_surfaces_stderr(self) -> None:
+        import io
+
+        class _FlagRejectProc:
+            def __init__(self) -> None:
+                self.stdin = io.StringIO()
+                self.stdout = io.StringIO("")
+                self.stderr = io.StringIO("flag provided but not defined: -include-default-customizations\n")
+
+            def poll(self):
+                return 2
+
+            def terminate(self):
+                pass
+
+            def wait(self, timeout=None):
+                return 2
+
+        good_proc = _FakeAcpProcess()
+        spawned_cmds: list[list[str]] = []
+
+        def _fake_popen(cmd, **kwargs):
+            spawned_cmds.append(list(cmd))
+            return _FlagRejectProc() if len(spawned_cmds) == 1 else good_proc
+
+        worker = AgyAcpWorker("agy", ProxyConfig(backend="agy-cli"))
+        try:
+            with patch("antigravity_proxy.agy_cli.subprocess.Popen", side_effect=_fake_popen):
+                worker.ensure_started()
+            self.assertEqual(len(spawned_cmds), 2)
+            self.assertEqual(spawned_cmds[1], ["agy", "acp", "--stdio"])
+        finally:
+            worker.close()
+
+    def test_acp_worker_timeout_raises_504(self) -> None:
+        import queue as _q
+
+        worker = AgyAcpWorker("agy", ProxyConfig(backend="agy-cli", upstream_timeout=1))
+        worker._use_stdout_reader = True
+        worker._stdout_queue = _q.Queue()
+        worker._stderr_lines.append("waiting for keyring")
+        with self.assertRaises(AgyCliError) as ctx:
+            worker._read_line(time.monotonic() + 0.05)
+        self.assertEqual(ctx.exception.status, 504)
+        self.assertIn("waiting for keyring", str(ctx.exception))
+
+    def test_server_stream_returns_http_error_on_early_acp_failure(self) -> None:
+        agy_client = MagicMock()
+        agy_client.stream_chat.side_effect = AgyCliError("agy not logged in", status=502)
+
+        cfg = ProxyConfig(backend="agy-cli", api_key="k")
+        server = ProxyHTTPServer(("127.0.0.1", 0), cfg, agy_client=agy_client)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        port = server.server_address[1]
+        try:
+            req = Request(
+                f"http://127.0.0.1:{port}/v1/chat/completions",
+                data=json.dumps({
+                    "model": "gemini-3.8-flash-low",
+                    "stream": True,
+                    "messages": [{"role": "user", "content": "hi"}],
+                }).encode("utf-8"),
+                headers={"Authorization": "Bearer k", "Content-Type": "application/json"},
+                method="POST",
+            )
+            with self.assertRaises(HTTPError) as ctx:
+                urlopen(req, timeout=5)
+            self.assertEqual(ctx.exception.code, 502)
+            body = json.loads(ctx.exception.read().decode("utf-8"))
+            self.assertIn("agy not logged in", body["error"]["message"])
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
 
     def test_acp_empty_response_triggers_recovery_turn(self) -> None:
         class _RecoveryProc(_FakeAcpProcess):

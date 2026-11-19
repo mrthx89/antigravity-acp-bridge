@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import collections
 import json
 import logging
 import os
@@ -25,6 +26,16 @@ _TOOL_CALL_CLOSE_TAG = "</openai_tool_calls>"
 _TOOL_CALL_RE = re.compile(
     r"<openai_tool_calls>\s*(.*?)\s*</openai_tool_calls>",
     re.DOTALL,
+)
+_FENCE_RE = re.compile(r"^```(?:json)?\s*\n?(.*?)\n?```$", re.DOTALL | re.IGNORECASE)
+_TRANSIENT_ACP_HINTS = (
+    "429",
+    "503",
+    "resource_exhausted",
+    "capacity",
+    "overloaded",
+    "temporarily unavailable",
+    "exited unexpectedly",
 )
 
 
@@ -166,6 +177,10 @@ def parse_openai_tool_calls(text: str) -> tuple[str | None, list[dict]]:
         return (text, [])
 
     raw_json = match.group(1).strip()
+    fence_match = _FENCE_RE.match(raw_json)
+    if fence_match:
+        raw_json = fence_match.group(1).strip()
+
     try:
         parsed = json.loads(raw_json)
     except json.JSONDecodeError:
@@ -199,10 +214,26 @@ def parse_openai_tool_calls(text: str) -> tuple[str | None, list[dict]]:
     return (remaining or None, tool_calls)
 
 
+def _trailing_tag_prefix_len(text: str, tag: str) -> int:
+    """Return length of the longest suffix of ``text`` that is a prefix of ``tag``."""
+    max_len = min(len(text), len(tag) - 1)
+    for size in range(max_len, 0, -1):
+        if text.endswith(tag[:size]):
+            return size
+    return 0
+
+
 def _platform_subprocess_kwargs() -> dict:
     if os.name == "nt":
         return {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0)}
     return {}
+
+
+def _is_transient_acp_error(exc: AgyCliError) -> bool:
+    if exc.status in (429, 502, 503, 504):
+        msg = str(exc).lower()
+        return any(hint in msg for hint in _TRANSIENT_ACP_HINTS)
+    return False
 
 
 class AgyAcpWorker:
@@ -216,6 +247,9 @@ class AgyAcpWorker:
         self._cwd: str | None = None
         self._req_id = 0
         self._initialized = False
+        self._stderr_lines: collections.deque[str] = collections.deque(maxlen=40)
+        self._stdout_queue: queue.Queue[str | None] | None = None
+        self._use_stdout_reader = False
 
     def _resolve_cwd(self) -> str:
         if self._config.agy_cwd and os.path.isdir(self._config.agy_cwd):
@@ -227,34 +261,63 @@ class AgyAcpWorker:
     def is_alive(self) -> bool:
         return self._proc is not None and self._proc.poll() is None
 
-    def ensure_started(self) -> None:
-        """Start and initialize the ACP stdio server if not already running."""
-        if self.is_alive() and self._initialized:
-            return
-        self.close_process()
+    def _recent_stderr(self) -> str:
+        if not self._stderr_lines:
+            return ""
+        return " | ".join(line.strip() for line in list(self._stderr_lines)[-6:] if line.strip())
 
-        self._cwd = self._resolve_cwd()
-        cmd = [
-            self._exe,
-            "acp",
-            "--stdio",
-            "--disable-telemetry",
-            "--include-default-customizations=false",
-            "--cli_log_file",
-            os.devnull,
-        ]
+    def _start_stream_drainers(self, proc: subprocess.Popen) -> None:
+        self._stderr_lines.clear()
+        stderr = getattr(proc, "stderr", None)
+        if stderr is not None:
+            def _drain_stderr() -> None:
+                try:
+                    for raw in stderr:
+                        line = raw.rstrip()
+                        if line:
+                            self._stderr_lines.append(line)
+                            logger.debug("agy stderr: %s", line)
+                except OSError:
+                    pass
+
+            threading.Thread(target=_drain_stderr, name="agy-stderr", daemon=True).start()
+
+        stdout = getattr(proc, "stdout", None)
+        # Only spin up a blocking reader thread for real OS pipes (which expose fileno()).
+        # In-memory test doubles without fileno() are read synchronously on demand.
+        if stdout is not None and hasattr(stdout, "fileno"):
+            q: queue.Queue[str | None] = queue.Queue()
+            self._stdout_queue = q
+            self._use_stdout_reader = True
+
+            def _drain_stdout() -> None:
+                try:
+                    for raw in stdout:
+                        q.put(raw)
+                except OSError:
+                    pass
+                finally:
+                    q.put(None)
+
+            threading.Thread(target=_drain_stdout, name="agy-stdout", daemon=True).start()
+        else:
+            self._stdout_queue = None
+            self._use_stdout_reader = False
+
+    def _spawn_and_initialize(self, cmd: list[str]) -> None:
         self._proc = subprocess.Popen(
             cmd,
             cwd=self._cwd,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
             text=True,
             encoding="utf-8",
             errors="replace",
             bufsize=1,
             **_platform_subprocess_kwargs(),
         )
+        self._start_stream_drainers(self._proc)
         self._req_id = 0
         self._initialized = False
         self._rpc(
@@ -264,8 +327,41 @@ class AgyAcpWorker:
                 "clientCapabilities": {},
                 "clientInfo": {"name": "antigravity-proxy", "version": "2.0.0"},
             },
+            timeout=min(30.0, float(self._config.upstream_timeout)),
         )
         self._initialized = True
+
+    def ensure_started(self) -> None:
+        """Start and initialize the ACP stdio server if not already running."""
+        if self.is_alive() and self._initialized:
+            return
+        self.close_process()
+
+        self._cwd = self._resolve_cwd()
+        preferred_cmd = [
+            self._exe,
+            "acp",
+            "--stdio",
+            "--disable-telemetry",
+            "--include-default-customizations=false",
+            "--cli_log_file",
+            os.devnull,
+        ]
+        try:
+            self._spawn_and_initialize(preferred_cmd)
+        except AgyCliError as exc:
+            err_lower = str(exc).lower()
+            # Older/alternate Linux builds of agy may not recognize every optional flag.
+            if "flag" in err_lower or "unknown" in err_lower:
+                logger.warning(
+                    "agy ACP rejected optional flags (%s); retrying with bare `agy acp --stdio`",
+                    exc,
+                )
+                self.close_process()
+                self._spawn_and_initialize([self._exe, "acp", "--stdio"])
+            else:
+                self.close_process()
+                raise
 
     def _next_id(self) -> int:
         self._req_id += 1
@@ -277,7 +373,9 @@ class AgyAcpWorker:
             self._proc.stdin.write(json.dumps(obj) + "\n")
             self._proc.stdin.flush()
         except OSError as exc:
-            raise AgyCliError(f"Failed writing to agy ACP stdin: {exc}", status=502) from exc
+            detail = self._recent_stderr()
+            suffix = f" (stderr: {detail})" if detail else ""
+            raise AgyCliError(f"Failed writing to agy ACP stdin: {exc}{suffix}", status=502) from exc
 
     def _reply_permission_denied(self, msg: dict) -> None:
         options = (msg.get("params") or {}).get("options") or []
@@ -297,15 +395,39 @@ class AgyAcpWorker:
         )
         self._write_json({"jsonrpc": "2.0", "id": msg["id"], "result": {"outcome": outcome}})
 
-    def _read_until_response(self, req_id: int) -> Iterator[dict]:
-        """Yield notification updates until the JSON-RPC response for ``req_id`` arrives."""
-        assert self._proc is not None and self._proc.stdout is not None
-        while True:
-            line = self._proc.stdout.readline()
-            if not line:
-                code = self._proc.poll()
+    def _read_line(self, deadline: float) -> str | None:
+        if self._use_stdout_reader and self._stdout_queue is not None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                detail = self._recent_stderr()
+                suffix = f" (stderr: {detail})" if detail else ""
+                self.close_process()
+                raise AgyCliError(f"agy ACP timed out waiting for response{suffix}", status=504)
+            try:
+                return self._stdout_queue.get(timeout=remaining)
+            except queue.Empty as exc:
+                detail = self._recent_stderr()
+                suffix = f" (stderr: {detail})" if detail else ""
+                self.close_process()
                 raise AgyCliError(
-                    f"agy ACP worker exited unexpectedly (code={code})",
+                    f"agy ACP timed out waiting for response{suffix}", status=504
+                ) from exc
+
+        assert self._proc is not None and self._proc.stdout is not None
+        line = self._proc.stdout.readline()
+        return line if line else None
+
+    def _read_until_response(self, req_id: int, *, timeout: float) -> Iterator[dict]:
+        """Yield notification updates until the JSON-RPC response for ``req_id`` arrives."""
+        deadline = time.monotonic() + max(1.0, timeout)
+        while True:
+            line = self._read_line(deadline)
+            if line is None:
+                code = self._proc.poll() if self._proc is not None else None
+                detail = self._recent_stderr()
+                suffix = f" (stderr: {detail})" if detail else ""
+                raise AgyCliError(
+                    f"agy ACP worker exited unexpectedly (code={code}){suffix}",
                     status=502,
                 )
             stripped = line.strip()
@@ -332,7 +454,7 @@ class AgyAcpWorker:
             if msg.get("method") == "session/update":
                 yield msg
 
-    def _rpc(self, method: str, params: dict) -> dict:
+    def _rpc(self, method: str, params: dict, *, timeout: float = 30.0) -> dict:
         req_id = self._next_id()
         self._write_json({
             "jsonrpc": "2.0",
@@ -340,7 +462,7 @@ class AgyAcpWorker:
             "method": method,
             "params": params,
         })
-        for item in self._read_until_response(req_id):
+        for item in self._read_until_response(req_id, timeout=timeout):
             if "__rpc_result__" in item:
                 return item["__rpc_result__"]
         return {}
@@ -360,7 +482,9 @@ class AgyAcpWorker:
                 "prompt": [{"type": "text", "text": prompt_text}],
             },
         })
-        for item in self._read_until_response(req_id):
+        for item in self._read_until_response(
+            req_id, timeout=float(self._config.upstream_timeout)
+        ):
             if "__rpc_result__" in item:
                 yield item
                 return
@@ -384,7 +508,10 @@ class AgyAcpWorker:
         self.ensure_started()
         assert self._cwd is not None
 
-        new_res = self._rpc("session/new", {"cwd": self._cwd, "mcpServers": []})
+        control_timeout = min(45.0, float(self._config.upstream_timeout))
+        new_res = self._rpc(
+            "session/new", {"cwd": self._cwd, "mcpServers": []}, timeout=control_timeout
+        )
         session_id = new_res.get("sessionId")
         if not session_id:
             raise AgyCliError(f"agy ACP session/new missing sessionId: {new_res}", status=502)
@@ -393,7 +520,11 @@ class AgyAcpWorker:
             current_model = (new_res.get("models") or {}).get("currentModelId")
             if model and model != current_model:
                 try:
-                    self._rpc("session/set_model", {"sessionId": session_id, "modelId": model})
+                    self._rpc(
+                        "session/set_model",
+                        {"sessionId": session_id, "modelId": model},
+                        timeout=control_timeout,
+                    )
                 except AgyCliError as exc:
                     raise AgyCliError(f"Invalid or unavailable model '{model}': {exc}", status=400) from exc
 
@@ -440,7 +571,7 @@ class AgyAcpWorker:
         finally:
             if self.is_alive():
                 try:
-                    self._rpc("session/close", {"sessionId": session_id})
+                    self._rpc("session/close", {"sessionId": session_id}, timeout=10.0)
                 except Exception:
                     pass
 
@@ -449,9 +580,15 @@ class AgyAcpWorker:
         proc = self._proc
         self._proc = None
         self._initialized = False
+        self._stdout_queue = None
+        self._use_stdout_reader = False
         if proc is None:
             return
-        for stream in (proc.stdin, proc.stdout):
+        for stream in (
+            getattr(proc, "stdin", None),
+            getattr(proc, "stdout", None),
+            getattr(proc, "stderr", None),
+        ):
             if stream is not None:
                 try:
                     stream.close()
@@ -487,8 +624,9 @@ class AgyCliClient:
         self._max_workers: int | None = (
             config.max_concurrency if config.max_concurrency > 0 else None
         )
-        self._pool: queue.LifoQueue[tuple[AgyAcpWorker, float]] = queue.LifoQueue()
         self._lock = threading.Lock()
+        self._cond = threading.Condition(self._lock)
+        self._idle: list[tuple[AgyAcpWorker, float]] = []
         self._created = 0
         self._closed = False
         # Idle workers are closed after this many seconds so an unlimited pool does not
@@ -522,6 +660,7 @@ class AgyCliClient:
         else:
             candidates.extend([
                 os.path.expanduser("~/.local/bin/agy"),
+                os.path.expanduser("~/.antigravity/bin/agy"),
                 "/usr/local/bin/agy",
                 "/usr/bin/agy",
             ])
@@ -532,80 +671,118 @@ class AgyCliClient:
         return None
 
     def preflight_check(self) -> bool:
-        """Verify the ``agy`` executable is available on this machine."""
+        """Verify the ``agy`` executable is available and diagnose auth issues early."""
         resolved = self.resolve_bin()
         if not resolved:
             logger.error("`%s` executable not found in PATH or standard locations.", self._config.agy_bin)
             logger.error("Install Antigravity CLI (`agy`) or pass --agy-bin.")
             return False
         logger.info("Using official agy CLI binary: %s", resolved)
+
+        try:
+            proc = subprocess.run(
+                [resolved, "models"],
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=15,
+                check=False,
+                **_platform_subprocess_kwargs(),
+            )
+            if proc.returncode != 0:
+                detail = (proc.stderr or proc.stdout or "").strip()
+                logger.warning(
+                    "`agy models` exited with code %d: %s",
+                    proc.returncode,
+                    detail[:300] or "(no output)",
+                )
+                logger.warning(
+                    "If running on Linux headless, authenticate first with `agy` or `agy acp --login`."
+                )
+            else:
+                models = [line.split()[0] for line in proc.stdout.splitlines() if line.strip()]
+                if models:
+                    self._cached_models = models
+        except Exception as exc:
+            logger.warning("Preflight `agy models` check failed: %s", exc)
+
         return True
 
     def warm_up(self) -> None:
         """Pre-start one ACP worker so the first incoming request avoids boot latency."""
         worker = self._acquire_worker()
+        broken = False
         try:
             worker.ensure_started()
+        except Exception:
+            broken = True
+            raise
         finally:
-            self._release_worker(worker, broken=False)
+            self._release_worker(worker, broken=broken)
 
     def _acquire_worker(self) -> AgyAcpWorker:
-        try:
-            worker, _idle_since = self._pool.get_nowait()
-            return worker
-        except queue.Empty:
-            pass
+        spawn_exe: str | None = None
+        with self._cond:
+            while True:
+                if self._idle:
+                    worker, _idle_since = self._idle.pop()
+                    return worker
+                if self._max_workers is None or self._created < self._max_workers:
+                    spawn_exe = self.resolve_bin()
+                    if not spawn_exe:
+                        raise AgyCliError(
+                            f"`{self._config.agy_bin}` executable not found", status=500
+                        )
+                    self._created += 1
+                    break
+                if self._closed:
+                    raise AgyCliError("agy worker pool is closed", status=503)
+                self._cond.wait()
 
-        with self._lock:
-            if self._max_workers is None or self._created < self._max_workers:
-                exe = self.resolve_bin()
-                if not exe:
-                    raise AgyCliError(f"`{self._config.agy_bin}` executable not found", status=500)
-                self._created += 1
-                return AgyAcpWorker(exe, self._config)
-
-        worker, _idle_since = self._pool.get()
-        return worker
+        return AgyAcpWorker(spawn_exe, self._config)
 
     def _release_worker(self, worker: AgyAcpWorker, *, broken: bool) -> None:
-        if self._closed or broken or not worker.is_alive():
-            worker.close()
-            with self._lock:
+        should_close = False
+        with self._cond:
+            if self._closed or broken or not worker.is_alive():
                 self._created = max(0, self._created - 1)
-            return
-        self._pool.put((worker, time.monotonic()))
+                should_close = True
+            else:
+                self._idle.append((worker, time.monotonic()))
+            self._cond.notify()
+        if should_close:
+            worker.close()
 
     def _reap_idle_workers(self) -> None:
-        """Close workers that sat idle past ``worker_idle_timeout``, shrinking the pool.
-
-        Without this an unlimited pool keeps peak-burst memory resident until restart:
-        every finished request leaves its ~230 MB ``agy`` process parked in the queue.
-        """
+        """Close workers that sat idle past ``worker_idle_timeout``, shrinking the pool."""
         tick = max(1.0, min(30.0, self._idle_timeout / 2))
         while not self._stop.wait(tick):
             now = time.monotonic()
-            keep: list[tuple[AgyAcpWorker, float]] = []
-            reaped = 0
-            while True:
-                try:
-                    worker, idle_since = self._pool.get_nowait()
-                except queue.Empty:
-                    break
-                if now - idle_since >= self._idle_timeout:
-                    worker.close()
-                    reaped += 1
-                else:
-                    keep.append((worker, idle_since))
-            for item in keep:
-                self._pool.put(item)
-            if reaped:
-                with self._lock:
-                    self._created = max(0, self._created - reaped)
+            expired: list[AgyAcpWorker] = []
+            still_warm = 0
+            with self._cond:
+                kept: list[tuple[AgyAcpWorker, float]] = []
+                for worker, idle_since in self._idle:
+                    if now - idle_since >= self._idle_timeout:
+                        expired.append(worker)
+                    else:
+                        kept.append((worker, idle_since))
+                self._idle = kept
+                still_warm = len(kept)
+                if expired:
+                    self._created = max(0, self._created - len(expired))
+                    self._cond.notify_all()
+
+            for worker in expired:
+                worker.close()
+            if expired:
                 logger.info(
                     "Idle reaper closed %d worker(s) after %.0fs idle; %d still warm",
-                    reaped,
+                    len(expired),
                     self._idle_timeout,
-                    len(keep),
+                    still_warm,
                 )
 
     def list_models(self) -> list[str]:
@@ -676,6 +853,75 @@ class AgyCliClient:
             "usage": usage,
         }
 
+    def _stream_with_tool_parsing(self, raw_gen: Iterator[dict]) -> Iterator[dict]:
+        """Stream chunks while detecting ``<openai_tool_calls>`` anywhere in the output."""
+        buf = ""
+        in_tool_tag = False
+        emitted_tool_calls = False
+        tool_idx = 0
+
+        for item in raw_gen:
+            if item.get("text"):
+                buf += item["text"]
+                while buf:
+                    if not in_tool_tag:
+                        start = buf.find(_TOOL_CALL_TAG)
+                        if start != -1:
+                            if start > 0:
+                                yield {"text": buf[:start]}
+                                buf = buf[start:]
+                            in_tool_tag = True
+                            continue
+
+                        keep = _trailing_tag_prefix_len(buf, _TOOL_CALL_TAG)
+                        safe_end = len(buf) - keep
+                        if safe_end > 0:
+                            yield {"text": buf[:safe_end]}
+                            buf = buf[safe_end:]
+                        break
+
+                    # Inside <openai_tool_calls>: wait until closing tag arrives.
+                    close_idx = buf.find(_TOOL_CALL_CLOSE_TAG)
+                    if close_idx == -1:
+                        break
+                    block_end = close_idx + len(_TOOL_CALL_CLOSE_TAG)
+                    block = buf[:block_end]
+                    buf = buf[block_end:]
+                    in_tool_tag = False
+
+                    rem, tcs = parse_openai_tool_calls(block)
+                    if tcs:
+                        indexed = []
+                        for tc in tcs:
+                            indexed.append(dict(tc, index=tool_idx))
+                            tool_idx += 1
+                        if rem:
+                            yield {"text": rem}
+                        emitted_tool_calls = True
+                        yield {"tool_calls": indexed}
+                    else:
+                        # Malformed JSON inside tag: preserve raw text instead of dropping it.
+                        yield {"text": block}
+
+            elif "finish_reason" in item:
+                if buf:
+                    rem, tcs = parse_openai_tool_calls(buf)
+                    if tcs:
+                        indexed = []
+                        for tc in tcs:
+                            indexed.append(dict(tc, index=tool_idx))
+                            tool_idx += 1
+                        if rem:
+                            yield {"text": rem}
+                        emitted_tool_calls = True
+                        yield {"tool_calls": indexed}
+                    else:
+                        yield {"text": buf}
+                    buf = ""
+                if emitted_tool_calls:
+                    item = dict(item, finish_reason="tool_calls")
+                yield item
+
     def stream_chat(self, body: dict, model: str) -> Iterator[dict]:
         """Stream OpenAI delta/tool_call/usage dicts via a warm ACP worker."""
         prompt = format_request_for_agy(body)
@@ -686,80 +932,54 @@ class AgyCliClient:
             body.get("tool_choice") != "none" and _compact_openai_tools(body.get("tools"))
         )
 
-        worker = self._acquire_worker()
-        broken = False
-        try:
-            raw_gen = worker.stream_prompt(
-                prompt, model, has_external_tools=has_external_tools
-            )
-            if not has_external_tools:
-                yield from raw_gen
-                return
-
-            # When external tools exist, hold leading text only while it could be <openai_tool_calls>.
-            buf = ""
-            streaming_plain = False
-            emitted_tool_calls = False
-            for item in raw_gen:
-                if item.get("text"):
-                    if streaming_plain:
-                        yield item
-                        continue
-                    buf += item["text"]
-                    stripped = buf.lstrip()
-                    if not stripped:
-                        continue
-                    if _TOOL_CALL_TAG.startswith(stripped) or stripped.startswith(_TOOL_CALL_TAG):
-                        if _TOOL_CALL_CLOSE_TAG in buf:
-                            rem, tcs = parse_openai_tool_calls(buf)
-                            buf = ""
-                            if tcs:
-                                indexed = [dict(tc, index=i) for i, tc in enumerate(tcs)]
-                                if rem:
-                                    yield {"text": rem}
-                                emitted_tool_calls = True
-                                yield {"tool_calls": indexed}
-                                streaming_plain = True
-                            else:
-                                streaming_plain = True
-                        continue
-                    # Clearly not a <openai_tool_calls> block; flush immediately.
-                    streaming_plain = True
-                    yield {"text": buf}
-                    buf = ""
-                elif "finish_reason" in item:
-                    if buf:
-                        rem, tcs = parse_openai_tool_calls(buf)
-                        if tcs:
-                            indexed = [dict(tc, index=i) for i, tc in enumerate(tcs)]
-                            if rem:
-                                yield {"text": rem}
-                            emitted_tool_calls = True
-                            yield {"tool_calls": indexed}
-                        else:
-                            yield {"text": buf}
-                    if emitted_tool_calls:
-                        item = dict(item, finish_reason="tool_calls")
+        max_attempts = 2
+        for attempt in range(max_attempts):
+            worker = self._acquire_worker()
+            broken = False
+            yielded_any = False
+            try:
+                raw_gen = worker.stream_prompt(
+                    prompt, model, has_external_tools=has_external_tools
+                )
+                stream = (
+                    self._stream_with_tool_parsing(raw_gen)
+                    if has_external_tools
+                    else raw_gen
+                )
+                for item in stream:
+                    yielded_any = True
                     yield item
-        except AgyCliError as exc:
-            broken = exc.status >= 500
-            raise
-        except Exception:
-            broken = True
-            raise
-        finally:
-            self._release_worker(worker, broken=broken)
+                return
+            except AgyCliError as exc:
+                broken = exc.status >= 500
+                if not yielded_any and attempt + 1 < max_attempts and _is_transient_acp_error(exc):
+                    logger.warning(
+                        "Transient agy ACP error (attempt %d/%d): %s — retrying with fresh worker",
+                        attempt + 1,
+                        max_attempts,
+                        exc,
+                    )
+                    time.sleep(1.5)
+                    continue
+                raise
+            except Exception:
+                broken = True
+                raise
+            finally:
+                self._release_worker(worker, broken=broken)
 
     def close(self) -> None:
         """Shut down all pooled ACP workers and clean up temp directories."""
-        self._closed = True
-        self._stop.set()
+        with self._cond:
+            self._closed = True
+            self._stop.set()
+            to_close = [worker for worker, _ in self._idle]
+            self._idle.clear()
+            self._created = max(0, self._created - len(to_close))
+            self._cond.notify_all()
+
         reaper = self._reaper
         if reaper is not None and reaper.is_alive() and reaper is not threading.current_thread():
             reaper.join(timeout=5)
-        while True:
-            try:
-                worker, _idle_since = self._pool.get_nowait()
-            except queue.Empty:
-                break
+        for worker in to_close:
             worker.close()

@@ -16,3 +16,4 @@ build/
 
 # Folder Custom
 [Gg]raphify-out/
+uv.lock

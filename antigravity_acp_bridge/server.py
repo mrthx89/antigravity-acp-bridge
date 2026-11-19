@@ -13,7 +13,7 @@ import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse
 
-from .agy_cli import AgyCliClient, AgyCliError, format_messages_for_agy
+from .agy_cli import AgyCliClient, AgyCliError
 from .auth import ProjectResolver, TokenManager
 from .config import (
     BridgeConfig,
@@ -115,7 +115,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
         self.end_headers()
         try:
             self.wfile.write(body)
-        except (BrokenPipeError, ConnectionResetError):
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
             pass
 
     def _send_error_json(
@@ -138,7 +138,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
         self.end_headers()
         try:
             self.wfile.write(body)
-        except (BrokenPipeError, ConnectionResetError):
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
             pass
 
     def _check_auth(self, path: str) -> bool:
@@ -176,6 +176,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
             try:
                 chunk_size = int(size_str, 16)
             except ValueError:
+                self.close_connection = True
                 self._send_error_json(
                     "invalid_request",
                     "Invalid chunked transfer encoding",
@@ -192,6 +193,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 break
             total += chunk_size
             if total > MAX_REQUEST_BODY_BYTES:
+                self.close_connection = True
                 self._send_error_json(
                     "payload_too_large",
                     f"Request body exceeds {MAX_REQUEST_BODY_BYTES} bytes",
@@ -234,6 +236,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 )
                 return None
             if length > MAX_REQUEST_BODY_BYTES:
+                self.close_connection = True
                 self._send_error_json(
                     "payload_too_large",
                     f"Request body exceeds {MAX_REQUEST_BODY_BYTES} bytes",
@@ -427,7 +430,8 @@ class BridgeHandler(BaseHTTPRequestHandler):
             if self._bridge.agy_client is None:
                 self._send_error_json("internal_error", "agy-cli backend is not initialized", http_code=500)
                 return
-            if not format_messages_for_agy(body.get("messages") or []):
+            messages = body.get("messages")
+            if not isinstance(messages, list) or not messages:
                 self._send_error_json(
                     "invalid_request",
                     "No messages provided",
@@ -535,7 +539,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
             self.wfile.write(payload)
             self.wfile.flush()
             return True
-        except (BrokenPipeError, ConnectionResetError):
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
             return False
 
     def _send_sse_json(self, obj: dict) -> bool:
@@ -651,16 +655,27 @@ class BridgeHandler(BaseHTTPRequestHandler):
         assert self._bridge.agy_client is not None
         # Pull the first event BEFORE sending HTTP 200 SSE headers so startup/auth/model
         # failures return proper HTTP 4xx/5xx JSON errors instead of 200 OK text.
+        gen = None
         try:
             gen = self._bridge.agy_client.stream_chat(body, backend_model)
             first_item = next(gen, None)
         except AgyCliError as exc:
+            if gen is not None:
+                try:
+                    gen.close()
+                except Exception:
+                    pass
             err_type = "invalid_request_error" if exc.status == 400 else "api_error"
             self._send_error_json(
                 "agy_cli_error", str(exc), err_type=err_type, http_code=exc.status
             )
             return
         except Exception as exc:
+            if gen is not None:
+                try:
+                    gen.close()
+                except Exception:
+                    pass
             self._send_error_json(
                 "agy_cli_error", f"agy CLI stream failed: {exc}", http_code=502
             )

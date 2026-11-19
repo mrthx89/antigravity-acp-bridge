@@ -277,7 +277,7 @@ class AgyCliBackendTests(unittest.TestCase):
         }
         prompt = format_request_for_agy(body)
         self.assertIn("CRITICAL RUNTIME RULES", prompt)
-        self.assertIn("[Tool Result (terminal)]", prompt)
+        self.assertIn("[Tool Result (terminal, id=call_1)]", prompt)
         self.assertIn("up 3 days", prompt)
 
         rem, tcs = parse_openai_tool_calls(
@@ -670,3 +670,189 @@ class IdleReaperTests(unittest.TestCase):
         self.assertEqual(len(images), 2)
         self.assertEqual(images[0], {"type": "image", "data": "QUJDREVGRw==", "mimeType": "image/jpeg"})
         self.assertEqual(images[1], {"type": "image", "data": "SEVMTE8=", "mimeType": "image/png"})
+
+
+class HeavyHermesReliabilityTests(unittest.TestCase):
+    def test_aborted_stream_closes_dirty_worker_instead_of_reusing(self) -> None:
+        class _StreamingWorker(_LiveWorker):
+            def stream_prompt(self, prompt, model, *, has_external_tools=False, image_blocks=None):
+                yield {"text": "first chunk"}
+                yield {"text": "second chunk"}
+                yield {"finish_reason": "stop", "usage": {"prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 3}}
+
+        workers: list[_StreamingWorker] = []
+        client = AgyCliClient(BridgeConfig(backend="agy-cli", max_concurrency=2, worker_idle_timeout=0))
+        try:
+            with patch("antigravity_acp_bridge.agy_cli.shutil.which", return_value="agy"), patch(
+                "antigravity_acp_bridge.agy_cli.AgyAcpWorker",
+                side_effect=lambda *a, **k: workers.append(_StreamingWorker()) or workers[-1],
+            ):
+                gen = client.stream_chat(
+                    {"messages": [{"role": "user", "content": "hi"}]},
+                    "gemini-3.8-flash-low",
+                )
+                first = next(gen)
+                self.assertEqual(first, {"text": "first chunk"})
+                # Simulate client disconnect mid-stream (e.g. Hermes Ctrl+C or timeout).
+                gen.close()
+
+            self.assertEqual(len(workers), 1)
+            self.assertTrue(workers[0].closed)
+            self.assertEqual(len(client._idle), 0)
+            self.assertEqual(client._created, 0)
+        finally:
+            client.close()
+
+    def test_parse_multiple_tool_call_blocks_claude_input_and_none_args(self) -> None:
+        raw = (
+            'Checking both.\n'
+            '<openai_tool_calls>[{"name": "read_file", "input": {"path": "a.py"}}]</openai_tool_calls>\n'
+            '<openai_tool_calls>[{"name": "noop", "arguments": null}]</openai_tool_calls>'
+        )
+        rem, tcs = parse_openai_tool_calls(raw)
+        self.assertEqual(rem, "Checking both.")
+        self.assertEqual(len(tcs), 2)
+        self.assertEqual(tcs[0]["function"]["name"], "read_file")
+        self.assertEqual(json.loads(tcs[0]["function"]["arguments"]), {"path": "a.py"})
+        self.assertEqual(tcs[1]["function"]["name"], "noop")
+        self.assertEqual(json.loads(tcs[1]["function"]["arguments"]), {})
+
+    def test_response_format_json_object_and_schema(self) -> None:
+        prompt_obj = format_request_for_agy({
+            "messages": [{"role": "user", "content": "Return status"}],
+            "response_format": {"type": "json_object"},
+        })
+        self.assertIn("valid JSON object", prompt_obj)
+
+        prompt_schema = format_request_for_agy({
+            "messages": [{"role": "user", "content": "Return status"}],
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {"name": "res", "schema": {"type": "object", "properties": {"ok": {"type": "boolean"}}}},
+            },
+        })
+        self.assertIn("JSON Schema", prompt_schema)
+        self.assertIn('"ok"', prompt_schema)
+
+    def test_banner_guard_allows_coding_prose_and_blocks_real_google_banners(self) -> None:
+        class _ChunkedTextProc(_FakeAcpProcess):
+            def __init__(self, chunks: list[str], error_msg: str | None = None) -> None:
+                super().__init__()
+                self._chunks = chunks
+                self._error_msg = error_msg
+
+            def handle_request(self, obj: dict) -> None:
+                if obj.get("method") == "session/prompt":
+                    self.sent.append(obj)
+                    req_id = obj.get("id")
+                    sid = obj["params"]["sessionId"]
+                    if self._error_msg is not None:
+                        self._responses.append(json.dumps({
+                            "jsonrpc": "2.0",
+                            "id": req_id,
+                            "error": {"code": -32000, "message": self._error_msg},
+                        }))
+                        return
+                    for txt in self._chunks:
+                        self._responses.append(json.dumps({
+                            "jsonrpc": "2.0",
+                            "method": "session/update",
+                            "params": {
+                                "sessionId": sid,
+                                "update": {
+                                    "sessionUpdate": "agent_message_chunk",
+                                    "content": {"type": "text", "text": txt},
+                                },
+                            },
+                        }))
+                    self._responses.append(json.dumps({
+                        "jsonrpc": "2.0",
+                        "id": req_id,
+                        "result": {"usage": {"inputTokens": 5, "outputTokens": 5, "totalTokens": 10}},
+                    }))
+                    return
+                super().handle_request(obj)
+
+        cfg = BridgeConfig(backend="agy-cli")
+
+        # 1. Normal coding response mentioning Terms of Service & Verification required must NOT 403.
+        fake_ok = _ChunkedTextProc([
+            "Berikut adalah halaman Terms of Service dan perbaikan pesan Verification required di auth.py.",
+        ])
+        with patch("antigravity_acp_bridge.agy_cli.subprocess.Popen", return_value=fake_ok):
+            worker = AgyAcpWorker("agy", cfg)
+            try:
+                events = list(worker.stream_prompt("Buat halaman Terms of Service", "gemini-3.8-flash-low"))
+            finally:
+                worker.close()
+        text = "".join(e.get("text", "") for e in events)
+        self.assertIn("Terms of Service", text)
+
+        # 2. Real Google ToS ban banner streamed in tiny chunks MUST raise HTTP 403.
+        fake_ban = _ChunkedTextProc([
+            "This ",
+            "service has been disabled due to a violation of Google Terms of Service.",
+        ])
+        with patch("antigravity_acp_bridge.agy_cli.subprocess.Popen", return_value=fake_ban):
+            worker = AgyAcpWorker("agy", cfg)
+            try:
+                with self.assertRaises(AgyCliError) as ctx:
+                    list(worker.stream_prompt("hi", "gemini-3.8-flash-low"))
+                self.assertEqual(ctx.exception.status, 403)
+            finally:
+                worker.close()
+
+        # 3. Real Google account verification banner MUST raise HTTP 403 with link.
+        verify_url = "https://accounts.google.com/signin/continue?sarp=1&auth_success_gemini=1"
+        fake_verify = _ChunkedTextProc([
+            f"Verification required. Please verify your account to continue: {verify_url}",
+        ])
+        with patch("antigravity_acp_bridge.agy_cli.subprocess.Popen", return_value=fake_verify):
+            worker = AgyAcpWorker("agy", cfg)
+            try:
+                with self.assertRaises(AgyCliError) as ctx:
+                    list(worker.stream_prompt("hi", "gemini-3.8-flash-low"))
+                self.assertEqual(ctx.exception.status, 403)
+                self.assertIn(verify_url, str(ctx.exception))
+            finally:
+                worker.close()
+
+        # 4. Upstream rate-limit JSON-RPC error MUST map to HTTP 429 for 9router/Hermes.
+        fake_429 = _ChunkedTextProc([], error_msg="RESOURCE_EXHAUSTED: rate limit exceeded")
+        with patch("antigravity_acp_bridge.agy_cli.subprocess.Popen", return_value=fake_429):
+            worker = AgyAcpWorker("agy", cfg)
+            try:
+                with self.assertRaises(AgyCliError) as ctx:
+                    list(worker.stream_prompt("hi", "gemini-3.8-flash-low"))
+                self.assertEqual(ctx.exception.status, 429)
+            finally:
+                worker.close()
+
+    def test_transient_failed_to_start_retries_and_rate_limit_maps_429(self) -> None:
+        attempts = {"count": 0}
+
+        class _FlakyWorker(_LiveWorker):
+            def stream_prompt(self, prompt, model, *, has_external_tools=False, image_blocks=None):
+                attempts["count"] += 1
+                if attempts["count"] == 1:
+                    raise AgyCliError("agy ACP error: Failed to start Antigravity conversation", status=502)
+                yield {"text": "recovered!"}
+                yield {"finish_reason": "stop", "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}}
+
+        client = AgyCliClient(BridgeConfig(backend="agy-cli", max_concurrency=2, worker_idle_timeout=0))
+        try:
+            with patch("antigravity_acp_bridge.agy_cli.shutil.which", return_value="agy"), patch(
+                "antigravity_acp_bridge.agy_cli.AgyAcpWorker", side_effect=lambda *a, **k: _FlakyWorker()
+            ), patch("antigravity_acp_bridge.agy_cli.time.sleep"):
+                resp = client.call_chat({"messages": [{"role": "user", "content": "hi"}]}, "gemini-3.8-flash-low")
+            self.assertEqual(attempts["count"], 2)
+            self.assertEqual(resp["choices"][0]["message"]["content"], "recovered!")
+        finally:
+            client.close()
+
+    def test_closed_pool_does_not_spawn_new_worker(self) -> None:
+        client = AgyCliClient(BridgeConfig(backend="agy-cli", max_concurrency=2, worker_idle_timeout=0))
+        client.close()
+        with self.assertRaises(AgyCliError) as ctx:
+            client._acquire_worker()
+        self.assertEqual(ctx.exception.status, 503)

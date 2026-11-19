@@ -94,6 +94,7 @@ def _lvl(suffix: str) -> str | None:
 # OpenAI-facing model name -> (backend_model_id, thinking_level)
 MODEL_MAP: dict[str, tuple[str, str | None]] = {
     # Gemini 3.8 Flash
+    "gemini-3.8-flash": ("gemini-3.8-flash-medium", _lvl("medium")),
     "gemini-3.8-flash-high": ("gemini-3.8-flash-high", _lvl("high")),
     "gemini-3.8-flash-medium": ("gemini-3.8-flash-medium", _lvl("medium")),
     "gemini-3.8-flash-low": ("gemini-3.8-flash-low", _lvl("low")),
@@ -114,7 +115,9 @@ MODEL_MAP: dict[str, tuple[str, str | None]] = {
     # Claude Sonnet / Opus 4.6
     "claude-sonnet-4-6": ("claude-sonnet-4-6", None),
     "claude-sonnet-4.6": ("claude-sonnet-4-6", None),
+    "claude-opus-4-6": ("claude-opus-4-6-thinking", None),
     "claude-opus-4.6": ("claude-opus-4-6-thinking", None),
+    "claude-opus-4-6-thinking": ("claude-opus-4-6-thinking", None),
     # Claude Sonnet 5.5
     "claude-sonnet-5-5-low": ("claude-sonnet-5-5-low", None),
     "claude-sonnet-5-5-medium": ("claude-sonnet-5-5-medium", None),

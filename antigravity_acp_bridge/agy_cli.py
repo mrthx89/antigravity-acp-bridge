@@ -41,8 +41,22 @@ _TRANSIENT_ACP_HINTS = (
     "capacity",
     "overloaded",
     "temporarily unavailable",
+    "unavailable",
     "exited unexpectedly",
+    "failed to start",
+    "failed writing",
+    "timed out",
+    "broken pipe",
+    "internal error",
 )
+_RATE_LIMIT_HINTS = (
+    "429",
+    "resource_exhausted",
+    "rate limit",
+    "quota",
+    "too many requests",
+)
+_MAX_IMAGE_DOWNLOAD_BYTES = 10 * 1024 * 1024  # 10 MiB cap per remote image
 
 
 class AgyCliError(Exception):
@@ -81,6 +95,36 @@ def _compact_openai_tools(tools: list | None) -> list[dict]:
     return compact
 
 
+def _extract_image_from_url(url: str) -> dict | None:
+    """Convert a data URI or HTTP(S) image URL into an ACP image ContentBlock."""
+    if not url:
+        return None
+    if url.startswith("data:"):
+        try:
+            header, b64 = url.split(",", 1)
+            mime = header[5:].split(";")[0] or "image/png"
+            return {"type": "image", "data": b64, "mimeType": mime}
+        except Exception:
+            return None
+    if url.startswith(("http://", "https://")):
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "antigravity-acp-bridge"})
+            with urllib.request.urlopen(req, timeout=15) as r:
+                raw = r.read(_MAX_IMAGE_DOWNLOAD_BYTES + 1)
+                if len(raw) > _MAX_IMAGE_DOWNLOAD_BYTES:
+                    logger.warning("Skipping image URL '%s': exceeds %d bytes", url, _MAX_IMAGE_DOWNLOAD_BYTES)
+                    return None
+                mime = r.headers.get("Content-Type", "image/png").split(";")[0]
+            return {
+                "type": "image",
+                "data": base64.b64encode(raw).decode("ascii"),
+                "mimeType": mime,
+            }
+        except Exception as exc:
+            logger.warning("Failed to fetch image URL '%s': %s", url, exc)
+    return None
+
+
 def extract_images_for_agy(messages: list[dict]) -> list[dict]:
     """Extract OpenAI image_url / input_image parts into ACP image ContentBlocks."""
     images: list[dict] = []
@@ -97,29 +141,18 @@ def extract_images_for_agy(messages: list[dict]) -> list[dict]:
             if ptype == "image_url":
                 iu = part.get("image_url")
                 url = iu.get("url") if isinstance(iu, dict) else (iu if isinstance(iu, str) else "")
-                if not url:
-                    continue
-                if url.startswith("data:"):
-                    try:
-                        header, b64 = url.split(",", 1)
-                        mime = header[5:].split(";")[0] or "image/png"
-                        images.append({"type": "image", "data": b64, "mimeType": mime})
-                    except Exception:
-                        pass
-                elif url.startswith(("http://", "https://")):
-                    try:
-                        req = urllib.request.Request(url, headers={"User-Agent": "antigravity-acp-bridge"})
-                        with urllib.request.urlopen(req, timeout=15) as r:
-                            raw = r.read()
-                            mime = r.headers.get("Content-Type", "image/png").split(";")[0]
-                        images.append({
-                            "type": "image",
-                            "data": base64.b64encode(raw).decode("ascii"),
-                            "mimeType": mime,
-                        })
-                    except Exception as exc:
-                        logger.warning("Failed to fetch image URL '%s': %s", url, exc)
+                block = _extract_image_from_url(url)
+                if block is not None:
+                    images.append(block)
             elif ptype in ("image", "input_image"):
+                url = part.get("image_url")
+                if isinstance(url, dict):
+                    url = url.get("url", "")
+                if isinstance(url, str) and url:
+                    block = _extract_image_from_url(url)
+                    if block is not None:
+                        images.append(block)
+                    continue
                 data = part.get("data") or part.get("image") or ""
                 mime = part.get("mimeType") or part.get("media_type") or "image/png"
                 if data:
@@ -144,8 +177,13 @@ def format_messages_for_agy(messages: list[dict]) -> str:
             continue
 
         if role == "tool":
-            name = msg.get("name") or msg.get("tool_call_id") or "tool"
-            turns.append(f"[Tool Result ({name})]\n{text}")
+            name = msg.get("name") or ""
+            call_id = msg.get("tool_call_id") or ""
+            if name and call_id and name != call_id:
+                label = f"{name}, id={call_id}"
+            else:
+                label = name or call_id or "tool"
+            turns.append(f"[Tool Result ({label})]\n{text}")
             continue
 
         if role == "assistant":
@@ -159,13 +197,21 @@ def format_messages_for_agy(messages: list[dict]) -> str:
                     if not isinstance(tc, dict):
                         continue
                     fn = tc.get("function") or {}
+                    raw_args = fn.get("arguments", "{}")
+                    if isinstance(raw_args, str):
+                        try:
+                            parsed_args = json.loads(raw_args)
+                        except json.JSONDecodeError:
+                            parsed_args = raw_args
+                    else:
+                        parsed_args = raw_args if raw_args is not None else {}
                     compact_tcs.append({
                         "id": tc.get("id", ""),
                         "name": fn.get("name", ""),
-                        "arguments": fn.get("arguments", "{}"),
+                        "arguments": parsed_args,
                     })
                 if compact_tcs:
-                    parts.append(f"{_TOOL_CALL_TAG}{json.dumps(compact_tcs)}{_TOOL_CALL_CLOSE_TAG}")
+                    parts.append(f"{_TOOL_CALL_TAG}{json.dumps(compact_tcs, ensure_ascii=False)}{_TOOL_CALL_CLOSE_TAG}")
             if parts:
                 turns.append("[Assistant]\n" + "\n".join(parts))
             continue
@@ -199,71 +245,118 @@ def format_request_for_agy(body: dict) -> str:
 
     rules = [
         "CRITICAL RUNTIME RULES:",
-        "1. Continue the conversation by responding directly to the latest [User] turn above. Do not repeat previous answers.",
+        "1. Continue the conversation by responding directly to the latest turn above (whether it is a [User] message or a [Tool Result]). Do not repeat previous answers or already-executed tool calls.",
         "2. NEVER invoke any built-in IDE/agent tools (such as run_command, view_file, write_to_file, list_dir, grep_search, find_by_name, etc.). Built-in tool execution is disabled.",
     ]
+    next_rule = 3
     if tools:
         rules.append(
-            "3. External OpenAI tools are provided below by the client. When you need to call one or more external tools, respond ONLY with:\n"
+            f"{next_rule}. External OpenAI tools are provided below by the client. When you need to call one or more external tools, respond ONLY with:\n"
             f'{_TOOL_CALL_TAG}[{{"name": "<tool_name>", "arguments": {{...}}}}]{_TOOL_CALL_CLOSE_TAG}\n'
             "Do not add prose outside those tags when calling tools."
         )
+        next_rule += 1
         if tool_choice == "required":
-            rules.append("4. You MUST call at least one external tool from the list below.")
+            rules.append(f"{next_rule}. You MUST call at least one external tool from the list below.")
         elif isinstance(tool_choice, dict) and tool_choice.get("type") == "function":
             forced_name = (tool_choice.get("function") or {}).get("name")
             if forced_name:
-                rules.append(f"4. You MUST call the external tool `{forced_name}`.")
+                rules.append(f"{next_rule}. You MUST call the external tool `{forced_name}`.")
+            else:
+                rules.append(f"{next_rule}. If no external tool is needed, reply directly in plain text.")
         else:
-            rules.append("4. If no external tool is needed, reply directly in plain text.")
+            rules.append(f"{next_rule}. If no external tool is needed, reply directly in plain text.")
+        next_rule += 1
         rules.append(f"Available external OpenAI tools:\n{json.dumps(tools, ensure_ascii=False)}")
     else:
-        rules.append("3. Respond directly in plain text without calling any tools.")
+        rules.append(f"{next_rule}. Respond directly in plain text without calling any tools.")
+        next_rule += 1
+
+    response_format = body.get("response_format")
+    if isinstance(response_format, dict):
+        rf_type = response_format.get("type")
+        if rf_type == "json_object":
+            rules.append(f"{next_rule}. Output ONLY a single valid JSON object with no markdown fences or extra commentary.")
+        elif rf_type == "json_schema":
+            schema_spec = response_format.get("json_schema") or {}
+            schema_json = json.dumps(schema_spec.get("schema", schema_spec), ensure_ascii=False)
+            rules.append(
+                f"{next_rule}. Output ONLY valid JSON conforming strictly to this JSON Schema (no markdown fences or commentary):\n{schema_json}"
+            )
 
     return "\n".join(rules) + "\n\n" + base_prompt
 
 
+def _extract_tool_arguments(fn: dict) -> str:
+    """Normalize tool call arguments from OpenAI/Anthropic shapes into a JSON string."""
+    raw = None
+    for key in ("arguments", "input", "parameters", "args"):
+        if key in fn and fn[key] is not None:
+            raw = fn[key]
+            break
+    if raw is None:
+        return "{}"
+    if isinstance(raw, (dict, list)):
+        return json.dumps(raw, ensure_ascii=False)
+    if isinstance(raw, str):
+        stripped = raw.strip()
+        return stripped if stripped else "{}"
+    return json.dumps(raw, ensure_ascii=False)
+
+
 def parse_openai_tool_calls(text: str) -> tuple[str | None, list[dict]]:
-    """Extract ``<openai_tool_calls>...</openai_tool_calls>`` into OpenAI format."""
-    match = _TOOL_CALL_RE.search(text)
-    if not match:
-        return (text, [])
-
-    raw_json = match.group(1).strip()
-    fence_match = _FENCE_RE.match(raw_json)
-    if fence_match:
-        raw_json = fence_match.group(1).strip()
-
-    try:
-        parsed = json.loads(raw_json)
-    except json.JSONDecodeError:
-        return (text, [])
-
-    if isinstance(parsed, dict):
-        parsed = [parsed]
-    if not isinstance(parsed, list):
+    """Extract all ``<openai_tool_calls>...</openai_tool_calls>`` blocks into OpenAI format."""
+    matches = list(_TOOL_CALL_RE.finditer(text))
+    if not matches:
         return (text, [])
 
     tool_calls: list[dict] = []
-    for item in parsed:
-        if not isinstance(item, dict):
+    consumed_spans: list[tuple[int, int]] = []
+
+    for match in matches:
+        raw_json = match.group(1).strip()
+        fence_match = _FENCE_RE.match(raw_json)
+        if fence_match:
+            raw_json = fence_match.group(1).strip()
+
+        try:
+            parsed = json.loads(raw_json)
+        except json.JSONDecodeError:
             continue
-        fn = item.get("function") if isinstance(item.get("function"), dict) else item
-        name = fn.get("name")
-        if not name:
+
+        if isinstance(parsed, dict):
+            parsed = [parsed]
+        if not isinstance(parsed, list):
             continue
-        args = fn.get("arguments", {})
-        args_str = json.dumps(args) if isinstance(args, (dict, list)) else str(args)
-        tool_calls.append({
-            "id": f"call_{uuid.uuid4().hex[:24]}",
-            "type": "function",
-            "function": {"name": name, "arguments": args_str},
-        })
+
+        block_calls: list[dict] = []
+        for item in parsed:
+            if not isinstance(item, dict):
+                continue
+            fn = item.get("function") if isinstance(item.get("function"), dict) else item
+            name = fn.get("name")
+            if not name:
+                continue
+            block_calls.append({
+                "id": f"call_{uuid.uuid4().hex[:24]}",
+                "type": "function",
+                "function": {"name": name, "arguments": _extract_tool_arguments(fn)},
+            })
+
+        if block_calls:
+            tool_calls.extend(block_calls)
+            consumed_spans.append(match.span())
 
     if not tool_calls:
         return (text, [])
 
-    remaining = (text[: match.start()] + text[match.end() :]).strip()
+    remaining_parts: list[str] = []
+    cursor = 0
+    for start, end in consumed_spans:
+        remaining_parts.append(text[cursor:start])
+        cursor = end
+    remaining_parts.append(text[cursor:])
+    remaining = "".join(remaining_parts).strip()
     return (remaining or None, tool_calls)
 
 
@@ -508,7 +601,10 @@ class AgyAcpWorker:
                     link_match = _ACCOUNT_LINK_RE.search(err_msg) or _ACCOUNT_LINK_RE.search(self._recent_stderr())
                     if link_match:
                         err_msg = f"{err_msg}. Google authentication required: {link_match.group(0)}"
-                    raise AgyCliError(f"agy ACP error: {err_msg}", status=502)
+                        raise AgyCliError(f"agy ACP error: {err_msg}", status=403)
+                    low_err = err_msg.lower()
+                    status = 429 if any(h in low_err for h in _RATE_LIMIT_HINTS) else 502
+                    raise AgyCliError(f"agy ACP error: {err_msg}", status=status)
                 yield {"__rpc_result__": msg.get("result") or {}}
                 return
 
@@ -599,6 +695,7 @@ class AgyAcpWorker:
         if not session_id:
             raise AgyCliError(f"agy ACP session/new missing sessionId: {new_res}", status=502)
 
+        prompt_finished = False
         try:
             current_model = (new_res.get("models") or {}).get("currentModelId")
             if model and model != current_model:
@@ -620,13 +717,36 @@ class AgyAcpWorker:
 
             def _check_banner(text: str) -> None:
                 low = text.lower()
-                if "terms of service" in low or "violation of terms" in low or "service has been disabled" in low:
+                stripped_low = low.strip()
+                is_tos_ban = (
+                    "this service has been disabled" in low
+                    or "terms of service violation" in low
+                    or ("violation of" in low and "terms of service" in low)
+                    or (
+                        "service has been disabled" in low
+                        and ("google" in low or "terms" in low or "violation" in low)
+                    )
+                )
+                if is_tos_ban:
                     raise AgyCliError(
                         "Google Antigravity service disabled: account has Terms of Service violation.",
                         status=403,
                     )
-                if "verification required" in low or "verify your account" in low:
-                    link_match = _ACCOUNT_LINK_RE.search(text) or _ACCOUNT_LINK_RE.search(self._recent_stderr())
+                link_match = _ACCOUNT_LINK_RE.search(text)
+                is_verify_banner = (
+                    "validation_required" in low
+                    or link_match is not None
+                    or (
+                        ("verification required" in low or "verify your account" in low)
+                        and (
+                            "to continue" in low
+                            or "accounts.google.com" in low
+                            or stripped_low.startswith(("verification required", "verify your account"))
+                        )
+                    )
+                )
+                if is_verify_banner:
+                    link_match = link_match or _ACCOUNT_LINK_RE.search(self._recent_stderr())
                     link_txt = f" Please open: {link_match.group(0)}" if link_match else ""
                     raise AgyCliError(
                         f"Google Account verification required.{link_txt}",
@@ -636,10 +756,10 @@ class AgyAcpWorker:
             suspicious_prefixes = (
                 "this service",
                 "terms of service",
-                "verification",
-                "verify",
-                "usage limit",
-                "agent execution error",
+                "violation of",
+                "validation_required",
+                "verification required",
+                "verify your account",
             )
 
             for item in self._run_prompt_turn(session_id, prompt, image_blocks=image_blocks):
@@ -652,9 +772,13 @@ class AgyAcpWorker:
                     if not head_settled:
                         head_buf += chunk_text
                         _check_banner(head_buf)
-                        low_buf = head_buf.lower().strip()
-                        if any(low_buf.startswith(p) for p in suspicious_prefixes):
-                            if len(head_buf) >= 160 or "\n" in head_buf:
+                        low_buf = head_buf.lower().lstrip()
+                        is_suspicious = bool(low_buf) and any(
+                            p.startswith(low_buf) or low_buf.startswith(p)
+                            for p in suspicious_prefixes
+                        )
+                        if is_suspicious:
+                            if len(head_buf) >= 200 or "\n" in head_buf:
                                 head_settled = True
                                 emitted_text = True
                                 yield {"text": head_buf}
@@ -697,16 +821,21 @@ class AgyAcpWorker:
                 )
                 yield {"text": fallback}
 
+            prompt_finished = True
             yield {
                 "finish_reason": "stop",
                 "usage": parse_agy_usage(final_result.get("usage")),
             }
         finally:
-            if self.is_alive():
+            if prompt_finished and self.is_alive():
                 try:
                     self._rpc("session/close", {"sessionId": session_id}, timeout=10.0)
                 except Exception:
-                    pass
+                    self.close_process()
+            elif not prompt_finished:
+                # Session was aborted mid-stream (e.g. client disconnect / GeneratorExit / error).
+                # Kill the subprocess immediately so unread stdout frames never pollute future turns.
+                self.close_process()
 
     def close_process(self) -> None:
         """Terminate the ACP child process and close stdio pipes."""
@@ -859,6 +988,8 @@ class AgyCliClient:
         spawn_exe: str | None = None
         with self._cond:
             while True:
+                if self._closed:
+                    raise AgyCliError("agy worker pool is closed", status=503)
                 if self._idle:
                     worker, _idle_since = self._idle.pop()
                     return worker
@@ -870,8 +1001,6 @@ class AgyCliClient:
                         )
                     self._created += 1
                     break
-                if self._closed:
-                    raise AgyCliError("agy worker pool is closed", status=503)
                 self._cond.wait()
 
         return AgyAcpWorker(spawn_exe, self._config)
@@ -962,7 +1091,9 @@ class AgyCliClient:
             if item.get("text"):
                 chunks.append(item["text"])
             if item.get("tool_calls"):
-                tool_calls.extend(item["tool_calls"])
+                for tc in item["tool_calls"]:
+                    # Non-streaming OpenAI chat.completion tool_calls omit streaming "index".
+                    tool_calls.append({k: v for k, v in tc.items() if k != "index"})
             if "finish_reason" in item:
                 finish_reason = item["finish_reason"]
             if "usage" in item:
@@ -1067,11 +1198,15 @@ class AgyCliClient:
             body.get("tool_choice") != "none" and _compact_openai_tools(body.get("tools"))
         )
 
-        max_attempts = 2
+        max_attempts = 3
         for attempt in range(max_attempts):
             worker = self._acquire_worker()
             broken = False
+            completed = False
             yielded_any = False
+            retry_delay: float | None = None
+            raw_gen = None
+            stream = None
             try:
                 raw_gen = worker.stream_prompt(
                     prompt,
@@ -1087,24 +1222,38 @@ class AgyCliClient:
                 for item in stream:
                     yielded_any = True
                     yield item
+                completed = True
                 return
             except AgyCliError as exc:
-                broken = exc.status >= 500
+                broken = exc.status >= 500 or exc.status == 429
                 if not yielded_any and attempt + 1 < max_attempts and _is_transient_acp_error(exc):
+                    retry_delay = 1.5 * (attempt + 1)
                     logger.warning(
-                        "Transient agy ACP error (attempt %d/%d): %s — retrying with fresh worker",
+                        "Transient agy ACP error (attempt %d/%d): %s — retrying with fresh worker in %.1fs",
                         attempt + 1,
                         max_attempts,
                         exc,
+                        retry_delay,
                     )
-                    time.sleep(1.5)
-                    continue
-                raise
+                else:
+                    raise
             except Exception:
                 broken = True
                 raise
             finally:
-                self._release_worker(worker, broken=broken)
+                for gen in (stream, raw_gen):
+                    if gen is not None and hasattr(gen, "close"):
+                        try:
+                            gen.close()
+                        except Exception:
+                            pass
+                # If the caller aborted mid-stream (e.g. GeneratorExit / client disconnect),
+                # completed is False — always kill and discard the worker so unread stdout
+                # frames never bleed into a subsequent request.
+                self._release_worker(worker, broken=(broken or not completed))
+
+            if retry_delay is not None:
+                time.sleep(retry_delay)
 
     def close(self) -> None:
         """Shut down all pooled ACP workers and clean up temp directories."""

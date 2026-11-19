@@ -1,16 +1,18 @@
-# AGENTS.md — LLM Agent Instructions
+# AGENTS.md — LLM Agent Instructions (Antigravity ACP Bridge)
 
-> **If you are an AI assistant (Claude, GPT, Gemini, etc.) helping a user set up this proxy, read this file first. It contains everything you need to guide the user through installation, configuration, and troubleshooting.**
+> **Trademark: YHDev Bekerja dengan Hati @ 2026**
+> **If you are an AI assistant (Claude, GPT, Gemini, etc.) helping a user set up this bridge, read this file first. It contains everything you need to guide the user through installation, configuration, and troubleshooting.**
 
 ---
 
 ## What This Project Is
 
-A local proxy server that translates OpenAI-compatible API calls into Google Antigravity's internal Cloud Code Assist API format. It lets any tool that speaks OpenAI format use Gemini and Claude models for free, authenticated via the Antigravity CLI's OAuth token.
+A local OpenAI-compatible bridge over Google Antigravity ACP (`agy acp --stdio`). It translates OpenAI-compatible API calls into Agent Client Protocol JSON-RPC interactions using the official `agy` binary with genuine Google client fingerprint.
 
-The proxy listens on `http://127.0.0.1:8877` and exposes two endpoints:
-- `POST /v1/chat/completions` — OpenAI chat format (messages, tools, streaming)
-- `POST /v1beta/models/{model}:generateContent` — native Gemini passthrough (images, structured output)
+The bridge listens on `http://127.0.0.1:8877` and exposes:
+- `POST /v1/chat/completions` — OpenAI chat format (messages, tools, vision, streaming)
+- `GET /v1/models` — model listing
+- `POST /v1beta/models/{model}:generateContent` — native Gemini passthrough (when using `--backend oauth`)
 
 ---
 

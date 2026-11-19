@@ -56,7 +56,10 @@ class ServerIntegrationTests(unittest.TestCase):
             # 1. Health stays public
             status, headers, raw = self._request(port, "GET", "/health")
             self.assertEqual(status, 200)
-            self.assertEqual(json.loads(raw)["status"], "ok")
+            health_data = json.loads(raw)
+            self.assertEqual(health_data["status"], "ok")
+            self.assertEqual(health_data["service"], "antigravity-acp-bridge")
+            self.assertEqual(health_data["trademark"], "YHDev Bekerja dengan Hati @ 2026")
 
             # 2. CORS preflight
             status, headers, _ = self._request(

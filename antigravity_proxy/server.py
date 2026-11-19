@@ -15,7 +15,14 @@ from urllib.parse import urlparse
 
 from .agy_cli import AgyCliClient, AgyCliError, format_messages_for_agy
 from .auth import ProjectResolver, TokenManager
-from .config import DEFAULT_MODEL, MAX_REQUEST_BODY_BYTES, MODEL_MAP, ProxyConfig
+from .config import (
+    DEFAULT_MODEL,
+    MAX_REQUEST_BODY_BYTES,
+    MODEL_MAP,
+    ProxyConfig,
+    SERVICE_NAME,
+    TRADEMARK,
+)
 from .translator import (
     build_gemini_request,
     build_passthrough_envelope,
@@ -61,7 +68,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
     """HTTP request handler exposing OpenAI-compatible and Gemini passthrough routes."""
 
     protocol_version = "HTTP/1.1"
-    server_version = "AntigravityProxy/2.0"
+    server_version = "Antigravity-ACP-Bridge/2.0"
 
     def log_message(self, fmt: str, *args) -> None:
         # Suppressed; structured request logging is handled by _log_request().
@@ -292,7 +299,14 @@ class ProxyHandler(BaseHTTPRequestHandler):
             if path in ("/v1/models", "/models"):
                 self._handle_models()
             elif path in _PUBLIC_HEALTH_PATHS:
-                self._send_json(200, {"status": "ok", "service": "antigravity-proxy"})
+                self._send_json(
+                    200,
+                    {
+                        "status": "ok",
+                        "service": SERVICE_NAME,
+                        "trademark": TRADEMARK,
+                    },
+                )
             else:
                 self._send_error_json(
                     "not_found",

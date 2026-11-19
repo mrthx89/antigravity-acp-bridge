@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import collections
 import json
 import logging
@@ -13,6 +14,7 @@ import subprocess
 import tempfile
 import threading
 import time
+import urllib.request
 import uuid
 from typing import Iterator
 
@@ -77,6 +79,52 @@ def _compact_openai_tools(tools: list | None) -> list[dict]:
             entry["parameters"] = fn["parameters"]
         compact.append(entry)
     return compact
+
+
+def extract_images_for_agy(messages: list[dict]) -> list[dict]:
+    """Extract OpenAI image_url / input_image parts into ACP image ContentBlocks."""
+    images: list[dict] = []
+    for msg in messages:
+        if not isinstance(msg, dict):
+            continue
+        content = msg.get("content")
+        if not isinstance(content, list):
+            continue
+        for part in content:
+            if not isinstance(part, dict):
+                continue
+            ptype = part.get("type")
+            if ptype == "image_url":
+                iu = part.get("image_url")
+                url = iu.get("url") if isinstance(iu, dict) else (iu if isinstance(iu, str) else "")
+                if not url:
+                    continue
+                if url.startswith("data:"):
+                    try:
+                        header, b64 = url.split(",", 1)
+                        mime = header[5:].split(";")[0] or "image/png"
+                        images.append({"type": "image", "data": b64, "mimeType": mime})
+                    except Exception:
+                        pass
+                elif url.startswith(("http://", "https://")):
+                    try:
+                        req = urllib.request.Request(url, headers={"User-Agent": "antigravity-acp-bridge"})
+                        with urllib.request.urlopen(req, timeout=15) as r:
+                            raw = r.read()
+                            mime = r.headers.get("Content-Type", "image/png").split(";")[0]
+                        images.append({
+                            "type": "image",
+                            "data": base64.b64encode(raw).decode("ascii"),
+                            "mimeType": mime,
+                        })
+                    except Exception as exc:
+                        logger.warning("Failed to fetch image URL '%s': %s", url, exc)
+            elif ptype in ("image", "input_image"):
+                data = part.get("data") or part.get("image") or ""
+                mime = part.get("mimeType") or part.get("media_type") or "image/png"
+                if data:
+                    images.append({"type": "image", "data": data, "mimeType": mime})
+    return images
 
 
 def format_messages_for_agy(messages: list[dict]) -> str:
@@ -487,15 +535,19 @@ class AgyAcpWorker:
         self,
         session_id: str,
         prompt_text: str,
+        image_blocks: list[dict] | None = None,
     ) -> Iterator[dict]:
         req_id = self._next_id()
+        prompt_blocks: list[dict] = [{"type": "text", "text": prompt_text}]
+        if image_blocks:
+            prompt_blocks.extend(image_blocks)
         self._write_json({
             "jsonrpc": "2.0",
             "id": req_id,
             "method": "session/prompt",
             "params": {
                 "sessionId": session_id,
-                "prompt": [{"type": "text", "text": prompt_text}],
+                "prompt": prompt_blocks,
             },
         })
         for item in self._read_until_response(
@@ -519,6 +571,7 @@ class AgyAcpWorker:
         model: str,
         *,
         has_external_tools: bool = False,
+        image_blocks: list[dict] | None = None,
     ) -> Iterator[dict]:
         """Run one isolated ACP session and yield ``text`` and final ``usage`` dicts."""
         self.ensure_started()
@@ -560,14 +613,64 @@ class AgyAcpWorker:
             saw_denied_tool = False
             final_result: dict = {}
 
-            for item in self._run_prompt_turn(session_id, prompt):
+            head_buf = ""
+            head_settled = False
+
+            def _check_banner(text: str) -> None:
+                low = text.lower()
+                if "terms of service" in low or "violation of terms" in low or "service has been disabled" in low:
+                    raise AgyCliError(
+                        "Google Antigravity service disabled: account has Terms of Service violation.",
+                        status=403,
+                    )
+                if "verification required" in low or "verify your account" in low:
+                    link_match = _ACCOUNT_LINK_RE.search(text) or _ACCOUNT_LINK_RE.search(self._recent_stderr())
+                    link_txt = f" Please open: {link_match.group(0)}" if link_match else ""
+                    raise AgyCliError(
+                        f"Google Account verification required.{link_txt}",
+                        status=403,
+                    )
+
+            suspicious_prefixes = (
+                "this service",
+                "terms of service",
+                "verification",
+                "verify",
+                "usage limit",
+                "agent execution error",
+            )
+
+            for item in self._run_prompt_turn(session_id, prompt, image_blocks=image_blocks):
                 if "__rpc_result__" in item:
                     final_result = item["__rpc_result__"]
                 elif item.get("__permission_denied__"):
                     saw_denied_tool = True
                 elif item.get("text"):
-                    emitted_text = True
-                    yield {"text": item["text"]}
+                    chunk_text = item["text"]
+                    if not head_settled:
+                        head_buf += chunk_text
+                        _check_banner(head_buf)
+                        low_buf = head_buf.lower().strip()
+                        if any(low_buf.startswith(p) for p in suspicious_prefixes):
+                            if len(head_buf) >= 160 or "\n" in head_buf:
+                                head_settled = True
+                                emitted_text = True
+                                yield {"text": head_buf}
+                                head_buf = ""
+                        else:
+                            head_settled = True
+                            emitted_text = True
+                            yield {"text": head_buf}
+                            head_buf = ""
+                    else:
+                        emitted_text = True
+                        yield {"text": chunk_text}
+
+            if head_buf:
+                _check_banner(head_buf)
+                emitted_text = True
+                yield {"text": head_buf}
+                head_buf = ""
 
             # If agy attempted a built-in tool and ended with zero text, ask once in-session
             # for a plain-text or <openai_tool_calls> reply so clients don't get empty responses.
@@ -956,6 +1059,8 @@ class AgyCliClient:
         if not prompt:
             raise AgyCliError("No messages provided", status=400)
 
+        image_blocks = extract_images_for_agy(body.get("messages") or [])
+
         has_external_tools = bool(
             body.get("tool_choice") != "none" and _compact_openai_tools(body.get("tools"))
         )
@@ -967,7 +1072,10 @@ class AgyCliClient:
             yielded_any = False
             try:
                 raw_gen = worker.stream_prompt(
-                    prompt, model, has_external_tools=has_external_tools
+                    prompt,
+                    model,
+                    has_external_tools=has_external_tools,
+                    image_blocks=image_blocks,
                 )
                 stream = (
                     self._stream_with_tool_parsing(raw_gen)

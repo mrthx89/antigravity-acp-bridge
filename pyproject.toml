@@ -3,15 +3,16 @@ requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "antigravity-proxy"
+name = "antigravity-acp-bridge"
 version = "2.0.0"
-description = "Zero-dependency local OpenAI-compatible proxy for Google Antigravity's Cloud Code Assist API"
+description = "Zero-dependency OpenAI-compatible bridge over Google Antigravity ACP — YHDev Bekerja dengan Hati @ 2026"
 readme = "README.md"
 license = { file = "LICENSE" }
 requires-python = ">=3.10"
 dependencies = []
 
 [project.scripts]
+antigravity-acp-bridge = "antigravity_proxy.cli:main"
 antigravity-proxy = "antigravity_proxy.cli:main"
 
 [tool.setuptools.packages.find]

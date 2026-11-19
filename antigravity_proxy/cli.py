@@ -10,7 +10,7 @@ from argparse import ArgumentParser
 
 from .agy_cli import AgyCliClient
 from .auth import ProjectResolver, TokenManager
-from .config import MODEL_MAP, ProxyConfig
+from .config import MODEL_MAP, ProxyConfig, SERVICE_TITLE, SERVICE_VERSION, TRADEMARK
 from .server import ProxyHTTPServer
 from .upstream import UpstreamClient
 
@@ -31,7 +31,7 @@ def configure_logging(level_name: str = "INFO") -> None:
 def build_arg_parser() -> ArgumentParser:
     """Create the CLI argument parser."""
     parser = ArgumentParser(
-        description="Antigravity OpenAI-compatible proxy (Cloud Code Assist API)"
+        description=f"{SERVICE_TITLE} v{SERVICE_VERSION} — {TRADEMARK}"
     )
     parser.add_argument(
         "--port",
@@ -168,7 +168,10 @@ def main(argv: list[str] | None = None) -> int:
         agy_client=agy_client,
     )
 
-    logger.info("Antigravity proxy listening on http://%s:%s/v1", config.host, config.port)
+    logger.info("======================================================================")
+    logger.info("%s v%s — %s", SERVICE_TITLE, SERVICE_VERSION, TRADEMARK)
+    logger.info("======================================================================")
+    logger.info("Listening on http://%s:%s/v1", config.host, config.port)
     logger.info("  Platform: %s", sys.platform)
     logger.info("  Backend:  %s", config.backend)
     logger.info("  Auth:     %s", "Bearer/x-api-key enabled" if config.api_key else "disabled (localhost mode)")

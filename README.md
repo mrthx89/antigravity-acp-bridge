@@ -1,8 +1,10 @@
 <div align="center">
 
-# Antigravity Proxy
+# Antigravity ACP Bridge
 
-**Free Gemini 3.8 Flash, Claude Sonnet 4.6 & more — through a local OpenAI-compatible proxy**
+**OpenAI-compatible bridge over Google Antigravity ACP (`agy acp --stdio`)**
+
+*Trademark: YHDev Bekerja dengan Hati @ 2026*
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
@@ -17,30 +19,36 @@
 
 ## What is this?
 
-A lightweight **OpenAI-compatible proxy** that bridges OpenAI-compatible clients to Google Antigravity via the official **`agy` CLI (`agy acp --stdio`)** by default (no OAuth token extraction or header spoofing), with optional legacy `oauth` mode. Authenticate once with the [Antigravity CLI](https://antigravity.google/), then use **Gemini** and **Claude** models from any OpenAI-compatible client.
+A lightweight, zero-dependency **OpenAI-compatible bridge** that connects your favorite tools (Hermes, Aider, Continue.dev, Cursor, OpenAI SDK) to Google Antigravity models using the official **`agy` CLI (`agy acp --stdio`)** by default.
+
+Every request runs through Google's official binary with its own genuine client harness fingerprint, completely avoiding the dangerous OAuth token scraping / HTTP replay that gets accounts banned on third-party reverse proxies.
 
 ```
-Your Tool (OpenAI format)  →  Antigravity Proxy (localhost:8877)  →  Official `agy acp` worker  →  Gemini / Claude models
+Your Client (OpenAI format)  ──HTTP──>  Antigravity ACP Bridge (:8877)  ──JSON-RPC/stdio──>  agy acp  ──>  Google AI Pro
 ```
 
 ### Why use this?
 
-- **Uses the official `agy` binary by default** — warm persistent `agy acp --stdio` workers (`--backend agy-cli`), no OAuth token harvesting
-- **Cross-platform** — runs on **Windows** and **Linux** (includes systemd user unit)
+- **Real Google Harness Fingerprint** — drives `agy acp --stdio` directly, zero risk of ToS ban from foreign HTTP client spoofing
+- **Multimodal / Vision Support** — pass images (`image_url` data URI or HTTP link) directly from OpenAI clients
+- **Banner Protection** — intercepts Google ToS & `VALIDATION_REQUIRED` banners at the stream head so ban text never leaks as an answer
+- **Cross-platform** — tested on **Windows** and **Linux** (includes systemd user unit)
 - **External-access ready** — built-in Bearer / `x-api-key` authentication, CORS headers, and `--max-concurrency` worker limit
 - **Zero dependencies** — pure Python 3.10+ stdlib, no `pip install` needed
 - **Streaming** — SSE streaming support (`"stream": true`) for real-time token generation
+- **Trademark** — *YHDev Bekerja dengan Hati @ 2026*
 
 ---
 
 ## Features
 
-- **OpenAI-compatible** `POST /v1/chat/completions` (streaming + non-streaming) and `GET /v1/models`
+- **OpenAI-compatible** `POST /v1/chat/completions` (streaming + non-streaming, function calling, vision) and `GET /v1/models`
 - **Persistent ACP worker pool (`agy-cli`, default)** — keeps `agy acp --stdio` warm with `--disable-telemetry`, `--include-default-customizations=false`, and `--cli_log_file` suppressed
+- **Google Ban & Verification Guard** — buffers initial stream tokens to intercept `Terms of Service` or `Verification Required` banners and extracts Google verification links
 - **Concurrency & auth protection** — `--max-concurrency` guard + mandatory `--api-key` when binding non-localhost hosts
 - **Legacy `oauth` mode (`--backend oauth`)** — optional direct Cloud Code Assist API + native Gemini passthrough (`POST /v1beta/models/{model}:generateContent`)
 - **Zero pip dependencies** — Python 3.10+ standard library only
-- **systemd service** included — run as a background service on Linux
+- **systemd service** included — run as a background service on Linux (`antigravity-acp-bridge.service`)
 
 ---
 
@@ -102,13 +110,15 @@ cd antigravity-proxy
 
 ```bash
 # Windows (PowerShell) or Linux/macOS (use python3 on Linux/macOS)
-python antigravity_proxy.py --host 127.0.0.1 --port 8877 --max-concurrency 1 --api-key "YOUR_LONG_SECRET"
+python antigravity_acp_bridge.py --host 127.0.0.1 --port 8877 --max-concurrency 1 --api-key "YOUR_LONG_SECRET"
 ```
+
+*(Note: `python antigravity_proxy.py ...` remains supported as a backward-compatible alias).*
 
 **Expose on LAN (other devices on your network) or behind a reverse proxy/tunnel:**
 
 ```bash
-python antigravity_proxy.py --host 0.0.0.0 --port 8877 --max-concurrency 1 --api-key "YOUR_LONG_SECRET"
+python antigravity_acp_bridge.py --host 0.0.0.0 --port 8877 --max-concurrency 1 --api-key "YOUR_LONG_SECRET"
 ```
 
 > **Public internet access:** Keep `--host 127.0.0.1` with `--api-key` and expose it through an HTTPS tunnel such as `cloudflared tunnel --url http://127.0.0.1:8877` or Tailscale so your API key is encrypted with TLS.
@@ -118,7 +128,7 @@ python antigravity_proxy.py --host 0.0.0.0 --port 8877 --max-concurrency 1 --api
 ```bash
 # Health check (public)
 curl http://127.0.0.1:8877/health
-# → {"status": "ok", "service": "antigravity-proxy"}
+# → {"status": "ok", "service": "antigravity-acp-bridge", "trademark": "YHDev Bekerja dengan Hati @ 2026"}
 
 # List models (authenticated when --api-key is set)
 curl http://127.0.0.1:8877/v1/models -H "Authorization: Bearer YOUR_LONG_SECRET"

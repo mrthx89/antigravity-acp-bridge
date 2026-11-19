@@ -644,3 +644,29 @@ class IdleReaperTests(unittest.TestCase):
                 client._release_worker(busy, broken=False)
         finally:
             client.close()
+
+    def test_extract_images_from_messages(self) -> None:
+        from antigravity_proxy.agy_cli import extract_images_for_agy
+
+        msgs = [
+            {"role": "user", "content": "hello"},
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "look at this"},
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": "data:image/jpeg;base64,QUJDREVGRw=="},
+                    },
+                    {
+                        "type": "image",
+                        "data": "SEVMTE8=",
+                        "mimeType": "image/png",
+                    },
+                ],
+            },
+        ]
+        images = extract_images_for_agy(msgs)
+        self.assertEqual(len(images), 2)
+        self.assertEqual(images[0], {"type": "image", "data": "QUJDREVGRw==", "mimeType": "image/jpeg"})
+        self.assertEqual(images[1], {"type": "image", "data": "SEVMTE8=", "mimeType": "image/png"})

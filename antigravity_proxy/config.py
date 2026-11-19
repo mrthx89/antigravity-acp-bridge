@@ -1,10 +1,15 @@
-"""Configuration, constants, and model mappings for Antigravity Proxy."""
+"""Configuration, constants, and model mappings for Antigravity ACP Bridge."""
 
 from __future__ import annotations
 
 import json
 import os
 from dataclasses import dataclass
+
+SERVICE_NAME = "antigravity-acp-bridge"
+SERVICE_TITLE = "Antigravity ACP Bridge"
+SERVICE_VERSION = "2.0.0"
+TRADEMARK = "YHDev Bekerja dengan Hati @ 2026"
 
 # OAuth client credentials embedded in the Antigravity CLI binary.
 DEFAULT_CLIENT_ID = (

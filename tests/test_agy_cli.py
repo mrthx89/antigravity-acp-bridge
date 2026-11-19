@@ -12,7 +12,7 @@ from unittest.mock import MagicMock, patch
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
-from antigravity_proxy.agy_cli import (
+from antigravity_acp_bridge.agy_cli import (
     AgyAcpWorker,
     AgyCliClient,
     AgyCliError,
@@ -21,8 +21,8 @@ from antigravity_proxy.agy_cli import (
     parse_agy_usage,
     parse_openai_tool_calls,
 )
-from antigravity_proxy.config import ProxyConfig
-from antigravity_proxy.server import ProxyHTTPServer
+from antigravity_acp_bridge.config import ProxyConfig
+from antigravity_acp_bridge.server import ProxyHTTPServer
 
 
 class _FakeAcpProcess:
@@ -210,7 +210,7 @@ class AgyCliBackendTests(unittest.TestCase):
                     fh.write("stub")
                 env_patch = {"HOME": tmpdir}
 
-            with patch("antigravity_proxy.agy_cli.shutil.which", return_value=None), patch.dict(
+            with patch("antigravity_acp_bridge.agy_cli.shutil.which", return_value=None), patch.dict(
                 os.environ, env_patch, clear=False
             ):
                 self.assertEqual(client.resolve_bin(), fake_bin)
@@ -220,8 +220,8 @@ class AgyCliBackendTests(unittest.TestCase):
         cfg = ProxyConfig(backend="agy-cli", max_concurrency=1)
         client = AgyCliClient(cfg)
 
-        with patch("antigravity_proxy.agy_cli.shutil.which", return_value="agy"), patch(
-            "antigravity_proxy.agy_cli.subprocess.Popen", return_value=fake_proc
+        with patch("antigravity_acp_bridge.agy_cli.shutil.which", return_value="agy"), patch(
+            "antigravity_acp_bridge.agy_cli.subprocess.Popen", return_value=fake_proc
         ) as m_popen:
             client.warm_up()
             events = list(
@@ -351,7 +351,7 @@ class AgyCliBackendTests(unittest.TestCase):
 
         worker = AgyAcpWorker("agy", ProxyConfig(backend="agy-cli"))
         try:
-            with patch("antigravity_proxy.agy_cli.subprocess.Popen", side_effect=_fake_popen):
+            with patch("antigravity_acp_bridge.agy_cli.subprocess.Popen", side_effect=_fake_popen):
                 worker.ensure_started()
             self.assertEqual(len(spawned_cmds), 2)
             self.assertEqual(spawned_cmds[1], ["agy", "acp", "--stdio"])
@@ -433,8 +433,8 @@ class AgyCliBackendTests(unittest.TestCase):
 
         fake_proc = _RecoveryProc()
         client = AgyCliClient(ProxyConfig(backend="agy-cli", max_concurrency=1))
-        with patch("antigravity_proxy.agy_cli.shutil.which", return_value="agy"), patch(
-            "antigravity_proxy.agy_cli.subprocess.Popen", return_value=fake_proc
+        with patch("antigravity_acp_bridge.agy_cli.shutil.which", return_value="agy"), patch(
+            "antigravity_acp_bridge.agy_cli.subprocess.Popen", return_value=fake_proc
         ):
             resp = client.call_chat(
                 {"messages": [{"role": "user", "content": "cek server"}]},
@@ -555,8 +555,8 @@ class PoolLimitSemanticsTest(unittest.TestCase):
     def test_unlimited_acquire_never_blocks_or_reuses(self) -> None:
         client = self._client(0)
         try:
-            with patch("antigravity_proxy.agy_cli.shutil.which", return_value="agy"), patch(
-                "antigravity_proxy.agy_cli.AgyAcpWorker", side_effect=lambda *a, **k: _LiveWorker()
+            with patch("antigravity_acp_bridge.agy_cli.shutil.which", return_value="agy"), patch(
+                "antigravity_acp_bridge.agy_cli.AgyAcpWorker", side_effect=lambda *a, **k: _LiveWorker()
             ):
                 workers = [client._acquire_worker() for _ in range(5)]
                 self.assertEqual(len({id(w) for w in workers}), 5)
@@ -571,8 +571,8 @@ class PoolLimitSemanticsTest(unittest.TestCase):
     def test_capped_pool_blocks_when_exhausted(self) -> None:
         client = self._client(1)
         try:
-            with patch("antigravity_proxy.agy_cli.shutil.which", return_value="agy"), patch(
-                "antigravity_proxy.agy_cli.AgyAcpWorker", side_effect=lambda *a, **k: _LiveWorker()
+            with patch("antigravity_acp_bridge.agy_cli.shutil.which", return_value="agy"), patch(
+                "antigravity_acp_bridge.agy_cli.AgyAcpWorker", side_effect=lambda *a, **k: _LiveWorker()
             ):
                 first = client._acquire_worker()
                 acquired: list = []
@@ -612,8 +612,8 @@ class IdleReaperTests(unittest.TestCase):
         client = self._client(0.2)
         try:
             workers: list[_LiveWorker] = []
-            with patch("antigravity_proxy.agy_cli.shutil.which", return_value="agy"), patch(
-                "antigravity_proxy.agy_cli.AgyAcpWorker",
+            with patch("antigravity_acp_bridge.agy_cli.shutil.which", return_value="agy"), patch(
+                "antigravity_acp_bridge.agy_cli.AgyAcpWorker",
                 side_effect=lambda *a, **k: workers.append(_LiveWorker()) or workers[-1],
             ):
                 held = [client._acquire_worker() for _ in range(2)]
@@ -634,8 +634,8 @@ class IdleReaperTests(unittest.TestCase):
     def test_busy_workers_survive_the_reaper(self) -> None:
         client = self._client(0.2)
         try:
-            with patch("antigravity_proxy.agy_cli.shutil.which", return_value="agy"), patch(
-                "antigravity_proxy.agy_cli.AgyAcpWorker", side_effect=lambda *a, **k: _LiveWorker()
+            with patch("antigravity_acp_bridge.agy_cli.shutil.which", return_value="agy"), patch(
+                "antigravity_acp_bridge.agy_cli.AgyAcpWorker", side_effect=lambda *a, **k: _LiveWorker()
             ):
                 busy = client._acquire_worker()
                 time.sleep(1.4)  # longer than the 1 s reaper tick
@@ -646,7 +646,7 @@ class IdleReaperTests(unittest.TestCase):
             client.close()
 
     def test_extract_images_from_messages(self) -> None:
-        from antigravity_proxy.agy_cli import extract_images_for_agy
+        from antigravity_acp_bridge.agy_cli import extract_images_for_agy
 
         msgs = [
             {"role": "user", "content": "hello"},

@@ -1,6 +1,2 @@
-"""Antigravity OpenAI-compatible proxy package."""
-
-from .config import DEFAULT_MODEL, MODEL_MAP, ProxyConfig
-
-__version__ = "2.0.0"
-__all__ = ["DEFAULT_MODEL", "MODEL_MAP", "ProxyConfig", "__version__"]
+# Backward-compatibility alias forwarding to antigravity_acp_bridge
+from antigravity_acp_bridge.__init__ import *

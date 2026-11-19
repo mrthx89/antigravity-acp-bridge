@@ -7,7 +7,7 @@ Trademark: YHDev Bekerja dengan Hati @ 2026
 from __future__ import annotations
 
 import sys
-from antigravity_proxy.cli import main
+from antigravity_acp_bridge.cli import main
 
 if __name__ == "__main__":
     sys.exit(main())

@@ -9,8 +9,8 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock, patch
 
-from antigravity_proxy.auth import ProjectResolver, TokenManager, deep_find, parse_expiry
-from antigravity_proxy.config import ProxyConfig
+from antigravity_acp_bridge.auth import ProjectResolver, TokenManager, deep_find, parse_expiry
+from antigravity_acp_bridge.config import ProxyConfig
 
 
 class AuthHelpersTests(unittest.TestCase):
@@ -81,7 +81,7 @@ class TokenManagerTests(unittest.TestCase):
 
             cfg = ProxyConfig(token_file=token_path)
             mgr = TokenManager(cfg)
-            with patch("antigravity_proxy.auth.urlopen", return_value=mock_resp):
+            with patch("antigravity_acp_bridge.auth.urlopen", return_value=mock_resp):
                 token = mgr.get_access_token()
 
             self.assertEqual(token, "fresh-access")
@@ -109,7 +109,7 @@ class ProjectResolverTests(unittest.TestCase):
         mock_resp.__enter__.return_value = mock_resp
 
         resolver = ProjectResolver(cfg, mgr)
-        with patch("antigravity_proxy.auth.urlopen", return_value=mock_resp) as m_open:
+        with patch("antigravity_acp_bridge.auth.urlopen", return_value=mock_resp) as m_open:
             self.assertEqual(resolver.get_project_id(), "discovered-proj")
             self.assertEqual(resolver.get_project_id(), "discovered-proj")
             self.assertEqual(m_open.call_count, 1)

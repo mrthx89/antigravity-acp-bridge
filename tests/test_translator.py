@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import unittest
 
-from antigravity_proxy.translator import (
+from antigravity_acp_bridge.translator import (
     SKIP_THOUGHT_SIGNATURE,
     build_gemini_request,
     build_passthrough_envelope,

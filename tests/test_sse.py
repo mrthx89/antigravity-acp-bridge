@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import unittest
 
-from antigravity_proxy.sse import (
+from antigravity_acp_bridge.sse import (
     parse_remaining,
     parse_sse_block,
     try_parse_one_event,

@@ -9,10 +9,10 @@ from unittest.mock import MagicMock
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
-from antigravity_proxy.cli import main as cli_main
-from antigravity_proxy.config import ProxyConfig
-from antigravity_proxy.server import ProxyHTTPServer
-from antigravity_proxy.upstream import UpstreamError
+from antigravity_acp_bridge.cli import main as cli_main
+from antigravity_acp_bridge.config import ProxyConfig
+from antigravity_acp_bridge.server import ProxyHTTPServer
+from antigravity_acp_bridge.upstream import UpstreamError
 
 
 class ServerIntegrationTests(unittest.TestCase):

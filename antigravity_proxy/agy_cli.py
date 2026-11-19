@@ -28,6 +28,10 @@ _TOOL_CALL_RE = re.compile(
     re.DOTALL,
 )
 _FENCE_RE = re.compile(r"^```(?:json)?\s*\n?(.*?)\n?```$", re.DOTALL | re.IGNORECASE)
+_ACCOUNT_LINK_RE = re.compile(
+    r"https://accounts\.google\.com/signin/[^\s<>'\"`]+auth_success_gemini[^\s<>'\"`]*",
+    re.IGNORECASE,
+)
 _TRANSIENT_ACP_HINTS = (
     "429",
     "503",
@@ -255,8 +259,17 @@ class AgyAcpWorker:
         if self._config.agy_cwd and os.path.isdir(self._config.agy_cwd):
             return self._config.agy_cwd
         if self._tmp_dir is None:
-            self._tmp_dir = tempfile.TemporaryDirectory(prefix="agy-acp-")
+            try:
+                self._tmp_dir = tempfile.TemporaryDirectory(prefix="agy-acp-", ignore_cleanup_errors=True)
+            except TypeError:
+                self._tmp_dir = tempfile.TemporaryDirectory(prefix="agy-acp-")
         return self._tmp_dir.name
+
+    def __del__(self) -> None:
+        try:
+            self.close()
+        except Exception:
+            pass
 
     def is_alive(self) -> bool:
         return self._proc is not None and self._proc.poll() is None
@@ -442,6 +455,9 @@ class AgyAcpWorker:
                 if "error" in msg and msg["error"]:
                     err = msg["error"]
                     err_msg = err.get("message", str(err)) if isinstance(err, dict) else str(err)
+                    link_match = _ACCOUNT_LINK_RE.search(err_msg) or _ACCOUNT_LINK_RE.search(self._recent_stderr())
+                    if link_match:
+                        err_msg = f"{err_msg}. Google authentication required: {link_match.group(0)}"
                     raise AgyCliError(f"agy ACP error: {err_msg}", status=502)
                 yield {"__rpc_result__": msg.get("result") or {}}
                 return
@@ -509,9 +525,21 @@ class AgyAcpWorker:
         assert self._cwd is not None
 
         control_timeout = min(45.0, float(self._config.upstream_timeout))
-        new_res = self._rpc(
-            "session/new", {"cwd": self._cwd, "mcpServers": []}, timeout=control_timeout
-        )
+        session_params: dict = {
+            "cwd": self._cwd,
+            "mcpServers": [],
+            "_meta": {"antigravity": {"disabledTools": ["schedule", "run_workflow"]}},
+        }
+        try:
+            new_res = self._rpc("session/new", session_params, timeout=control_timeout)
+        except AgyCliError as exc:
+            # Fallback for older ACP builds that reject unrecognized _meta fields
+            if "_meta" in str(exc) or "unknown" in str(exc).lower():
+                new_res = self._rpc(
+                    "session/new", {"cwd": self._cwd, "mcpServers": []}, timeout=control_timeout
+                )
+            else:
+                raise
         session_id = new_res.get("sessionId")
         if not session_id:
             raise AgyCliError(f"agy ACP session/new missing sessionId: {new_res}", status=502)

@@ -183,7 +183,7 @@ def format_messages_for_agy(messages: list[dict]) -> str:
     if len(turns) == 1 and not turns[0].startswith("["):
         sections.append(turns[0])
     else:
-        sections.append("Conversation history:\n" + "\n\n".join(turns))
+        sections.append("Conversation history:\n" + "\n\n".join(turns) + "\n\n[Assistant]")
 
     return "\n\n".join(sections)
 
@@ -199,25 +199,26 @@ def format_request_for_agy(body: dict) -> str:
 
     rules = [
         "CRITICAL RUNTIME RULES:",
-        "1. NEVER invoke any built-in IDE/agent tools (such as run_command, view_file, write_to_file, list_dir, grep_search, find_by_name, etc.). Built-in tool execution is disabled.",
+        "1. Continue the conversation by responding directly to the latest [User] turn above. Do not repeat previous answers.",
+        "2. NEVER invoke any built-in IDE/agent tools (such as run_command, view_file, write_to_file, list_dir, grep_search, find_by_name, etc.). Built-in tool execution is disabled.",
     ]
     if tools:
         rules.append(
-            "2. External OpenAI tools are provided below by the client. When you need to call one or more external tools, respond ONLY with:\n"
+            "3. External OpenAI tools are provided below by the client. When you need to call one or more external tools, respond ONLY with:\n"
             f'{_TOOL_CALL_TAG}[{{"name": "<tool_name>", "arguments": {{...}}}}]{_TOOL_CALL_CLOSE_TAG}\n'
             "Do not add prose outside those tags when calling tools."
         )
         if tool_choice == "required":
-            rules.append("3. You MUST call at least one external tool from the list below.")
+            rules.append("4. You MUST call at least one external tool from the list below.")
         elif isinstance(tool_choice, dict) and tool_choice.get("type") == "function":
             forced_name = (tool_choice.get("function") or {}).get("name")
             if forced_name:
-                rules.append(f"3. You MUST call the external tool `{forced_name}`.")
+                rules.append(f"4. You MUST call the external tool `{forced_name}`.")
         else:
-            rules.append("3. If no external tool is needed, reply directly in plain text.")
+            rules.append("4. If no external tool is needed, reply directly in plain text.")
         rules.append(f"Available external OpenAI tools:\n{json.dumps(tools, ensure_ascii=False)}")
     else:
-        rules.append("2. Respond directly in plain text without calling any tools.")
+        rules.append("3. Respond directly in plain text without calling any tools.")
 
     return "\n".join(rules) + "\n\n" + base_prompt
 
